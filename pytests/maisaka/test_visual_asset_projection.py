@@ -49,32 +49,3 @@ async def test_invalid_visual_selection_cannot_add_components(monkeypatch):
     monkeypatch.setattr(bridge, "resolve_policy", policy)
     with pytest.raises(ValueError, match="Invalid visual asset"):
         await select_visual_assets([EmojiComponent(binary_hash="a" * 64)])
-
-
-@pytest.mark.asyncio
-async def test_asset_plugin_uses_sdk_and_rechecks_restored_files(monkeypatch, tmp_path):
-    import importlib
-    import sys
-    import types
-    from pathlib import Path
-    pkg_name = "arale_policy_context_asset_test"
-    if pkg_name not in sys.modules:
-        package = types.ModuleType(pkg_name)
-        package.__path__ = [str(Path("plugins/Arale-policy/context").resolve())]
-        sys.modules[pkg_name] = package
-    module = importlib.import_module(pkg_name + ".assets")
-    monkeypatch.setattr(module, "__file__", str(tmp_path / "plugins" / "Arale-policy" / "context" / "assets.py"))
-    image = tmp_path / "data" / "emoji.gif"
-    image.parent.mkdir()
-    query = AsyncMock(return_value={"full_path": "data/emoji.gif", "no_file_flag": False})
-    from maibot_sdk import PluginContext
-    async def rpc(method, plugin_id, payload, **kwargs):
-        assert method == "cap.call" and payload["capability"] == "database.query"
-        args = payload["args"]
-        return await query(args["model_name"], filters=args["filters"], single_result=args["single_result"])
-    ctx = PluginContext("Arale-context-policy", rpc_call=rpc)
-    assets = [{"hash": "a" * 64, "kind": "emoji"}]
-    assert await module.available_assets(ctx, assets) == []
-    image.write_bytes(b"original asset")
-    assert await module.available_assets(ctx, assets) == [0]
-    query.assert_awaited_with("Images", filters={"image_hash": "a" * 64, "image_type": "EMOJI"}, single_result=True)

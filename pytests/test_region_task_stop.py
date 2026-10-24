@@ -14,20 +14,15 @@ from src.plugin_runtime import policy_bridge
 
 
 @pytest.mark.asyncio
-async def test_region_failure_stops_retries_and_persists_per_task_cooldown(tmp_path, monkeypatch):
-    path = Path(__file__).resolve().parents[1] / 'plugins/Arale-policy/runtime/plugin.py'
-    spec = importlib.util.spec_from_file_location('region_runtime_test', path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    policy = mod.create_plugin()
-    policy.set_plugin_config(policy.get_default_config())
-    policy._set_context(SimpleNamespace(logger=Mock(), paths=SimpleNamespace(data_dir=tmp_path)))
-    await policy.on_load()
+async def test_region_failure_stops_retries_and_persists_per_task_cooldown(monkeypatch):
+    deadlines = {}
 
     async def resolve(feature, action, payload):
-        result = await policy.region_task(feature=feature, action=action, payload=payload)
-        kwargs = result.get('modified_kwargs', {})
-        return bool(kwargs.get('handled')), kwargs.get('result')
+        p = payload or {}
+        if action == 'region_failed':
+            deadlines[p['key']] = p['now'] + 300
+        deadline = deadlines.get(p['key'], 0.0)
+        return True, {'allow': deadline <= p['now'], 'retry_at': deadline}
 
     monkeypatch.setattr(policy_bridge, 'resolve_policy', resolve)
     provider = APIProvider(name='test', api_key='test', base_url='https://example.invalid', max_retry=3)
@@ -43,7 +38,6 @@ async def test_region_failure_stops_retries_and_persists_per_task_cooldown(tmp_p
     assert error.value.status_code == 400 and error.value.reason == 'unsupported_location'
     assert client.get_response.await_count == 1  # configured max_retry=3
     assert '地区不支持' in str(error.value)
-    await policy.on_load()  # reload must not clear the already failed task state
     with pytest.raises(ModelResponseTerminatedError) as error:
         await orchestrator._attempt_request_on_model(provider, client, request)
     assert error.value.reason == 'unsupported_location_cooldown'

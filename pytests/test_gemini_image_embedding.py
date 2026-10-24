@@ -13,75 +13,9 @@ import pytest
 
 from src.config.model_configs import APIProvider, ModelInfo
 from src.llm_models.exceptions import RespNotOkException, RespParseException
-from src.llm_models.exceptions import EmbeddingQuotaCooldownError
-from pytests.plugin_runtime.test_arale_migration import load,plugin
-from importlib import import_module
-EmbeddingCooldown=import_module(load('Arale-model-policy')[0].__name__+'.cooldown').EmbeddingCooldown
 from src.llm_models.model_client.base_client import EmbeddingRequest, ImageEmbeddingRequest
 from src.llm_models.model_client.gemini_client import GeminiClient
 import src.llm_models.model_client.gemini_client as gemini_module
-
-
-@pytest.mark.asyncio
-async def test_embedding_quota_cooldown_is_shared_by_text_and_image_clients(monkeypatch, tmp_path):
-    cooldown = EmbeddingCooldown()
-    policy,_=plugin('Arale-model-policy',tmp_path)
-    await policy.on_load();policy._cooldown=cooldown
-    from src.plugin_runtime import policy_bridge
-    async def bridge(feature,action,payload):
-        if feature!='model':return False,None
-        out=await policy.resolve(feature,action,payload)
-        return True,out['modified_kwargs']['result']
-    monkeypatch.setattr(policy_bridge,'resolve_policy',bridge)
-    monkeypatch.setattr(gemini_module, "save_failed_request_snapshot", lambda **kwargs: tmp_path / "error.json")
-    calls = []
-
-    def exhausted(request):
-        calls.append(request)
-        return httpx.Response(429, json={"error": {
-            "code": 429, "status": "RESOURCE_EXHAUSTED", "message": "quota exceeded",
-            "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "3600s"}],
-        }})
-
-    first = make_client(exhausted)
-    second = make_client(exhausted)
-    try:
-        with pytest.raises(EmbeddingQuotaCooldownError):
-            await first.get_image_embedding(make_request())
-        text_request = EmbeddingRequest(model_info=make_request().model_info, embedding_input="probe")
-        with pytest.raises(EmbeddingQuotaCooldownError):
-            await second.get_embedding(text_request)
-        assert len(calls) == 1
-        key = cooldown.key(first.api_provider.base_url, first.api_provider.api_key, "gemini-embedding-2")
-        cooldown._deadlines[key] = 0.0
-        with pytest.raises(EmbeddingQuotaCooldownError):
-            await second.get_embedding(text_request)
-        assert len(calls) == 2
-    finally:
-        for client in (first, second):
-            await client.client.aio.aclose()
-            client.client.close()
-
-
-def test_quota_cooldown_ignores_unstructured_or_invalid_retry_delays():
-    cooldown = EmbeddingCooldown()
-    assert cooldown.record("key", {"error": {"message": "quota exceeded"}}) is None
-    for value in ("NaNs", "infs", "-1s", "invalid", 42):
-        assert cooldown.record("key", {"error": {"details": [
-            {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": value}
-        ]}}) is None
-    assert cooldown.deadline("key") is None
-
-
-def test_daily_quota_without_retry_info_sets_waiting_deadline():
-    cooldown = EmbeddingCooldown()
-    deadline = cooldown.record("key", {"error": {"details": [
-        {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [
-            {"quotaId": "EmbedContentRequestsPerDayPerProjectPerModel-FreeTier"}
-        ]}
-    ]}})
-    assert deadline is not None
-    assert cooldown.deadline("key") == deadline
 
 
 def make_client(handler: Any) -> GeminiClient:

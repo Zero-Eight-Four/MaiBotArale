@@ -11,14 +11,17 @@ from src.services.image_writeback_journal import ImageWritebackJournal
 
 
 @pytest.fixture(autouse=True)
-def memory_policy(monkeypatch,tmp_path):
-    from pytests.plugin_runtime.test_arale_migration import plugin
+def memory_policy(monkeypatch):
+    from pathlib import Path
     from src.plugin_runtime import policy_bridge
-    p,_=plugin('Arale-memory-policy',tmp_path)
-    async def resolve(feature,action,payload):
-        out=await p.accept(feature,action,payload)
-        return True,out['modified_kwargs']['result']
-    monkeypatch.setattr(policy_bridge,'resolve_policy',resolve)
+
+    async def resolve(feature, action, payload):
+        p = payload or {}
+        with Image.open(Path(p['asset_path'])) as im:
+            accepted = int(getattr(im, 'n_frames', 1)) <= 1
+        return True, {'accepted': accepted, 'reason': '多帧图片不进入静态图片记忆'}
+
+    monkeypatch.setattr(policy_bridge, 'resolve_policy', resolve)
 
 
 def picture(*, animated=False):

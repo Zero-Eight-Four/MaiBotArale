@@ -135,6 +135,8 @@ _PROFILE_ACTIONS = {
 _FEEDBACK_ACTIONS = {"list", "get", "rollback"}
 _FACT_ACTIONS = {"get", "list", "create", "update", "retract", "restore"}
 _RUNTIME_ACTIONS = {
+    "list_vector_spaces",
+    "delete_vector_space",
     "save",
     "get_config",
     "self_check",

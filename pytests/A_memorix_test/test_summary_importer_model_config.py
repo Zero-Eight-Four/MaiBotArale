@@ -44,6 +44,25 @@ def test_persist_vector_store_delegates_to_runtime_facade() -> None:
     assert persisted == [store]
 
 
+def test_summary_persistence_uses_active_dual_pools_not_retired_single_pool() -> None:
+    persisted: list[object] = []
+    retired, paragraph, graph = object(), object(), object()
+    plugin = SimpleNamespace(persist_vector_store=lambda store: persisted.append(store))
+    importer = SummaryImporter(
+        vector_store=retired, graph_store=None, metadata_store=None, embedding_manager=None,
+        plugin_config={
+            "plugin_instance": plugin,
+            "retrieval": {"vector_pools": {"mode": "dual"}},
+            "runtime": {"vector_pools_ready": True},
+            "paragraph_vector_store": paragraph,
+            "graph_vector_store": graph,
+        },
+    )
+    importer._persist_active_vector_stores()
+    assert persisted == [paragraph, graph]
+    assert retired not in persisted
+
+
 def _fake_available_models() -> dict[str, TaskConfig]:
     return {
         "memory": TaskConfig(
@@ -203,9 +222,9 @@ def test_summary_prompt_requires_incremental_output_from_current_window() -> Non
         image_evidence_catalog="无",
     )
 
-    assert "只输出当前聊天窗口新引入或明确变更" in prompt
-    assert "不得把未变化的历史事实再次写入 summary" in prompt
-    assert '"summary": ""' in prompt
+    assert "只记录当前窗口新增、明确更正" in prompt
+    assert "不重写未变化的有效历史" in prompt
+    assert '"summary":""' in prompt.replace(' ', '')
 
 
 @pytest.mark.parametrize("locale", ["zh-CN", "en-US", "ja-JP"])

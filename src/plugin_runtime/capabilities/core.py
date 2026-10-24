@@ -1,4 +1,5 @@
-﻿from datetime import datetime
+from pathlib import Path
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 import asyncio
@@ -846,17 +847,37 @@ class RuntimeCoreCapabilityMixin:
 
         try:
             audio_base64 = _normalize_audio_base64_arg(args)
+            if args.get("audio_path"):
+                from src.plugin_runtime.runner.plugin_paths import build_plugin_paths, ensure_child_path
+                from src.config.config import PROJECT_ROOT
+                paths = build_plugin_paths(plugin_id, PROJECT_ROOT)
+                audio_path = ensure_child_path(Path(str(args["audio_path"])), paths.runtime_dir)
+                raw = await asyncio.to_thread(audio_path.read_bytes)
+                if len(raw) > 20 * 1024 * 1024:
+                    raise ValueError("音频资产超过20MB")
+                audio_base64 = base64.b64encode(raw).decode()
             if audio_base64 is None:
                 return {"success": False, "error": "缺少必要参数 audio_base64 或 voice_base64"}
 
             task_name = resolve_task_name(
                 str(args.get("task_name", "") or args.get("model", "") or args.get("model_name", "") or "voice")
             )
+            if bool(args.get("apply_policy")) and task_name == "voice":
+                from src.common.utils.utils_voice import get_voice_text
+
+                text = await get_voice_text(
+                    base64.b64decode(audio_base64),
+                    session_id=str(args.get("stream_id") or ""),
+                    message_id=str(args.get("message_id") or ""),
+                )
+                return {"success": bool(text), "text": text or "", "content": text or ""}
             asr_client = LLMServiceClient(
                 task_name=task_name,
                 request_type=f"plugin.{plugin_id}.asr",
             )
-            result = await asr_client.transcribe_audio(audio_base64)
+            result = await asr_client.transcribe_audio(audio_base64,
+                session_id=str(args.get("stream_id") or ""),
+                audio_options=args.get("audio_options") if isinstance(args.get("audio_options"), dict) else None)
             text = result.text or ""
             return {
                 "success": bool(text),

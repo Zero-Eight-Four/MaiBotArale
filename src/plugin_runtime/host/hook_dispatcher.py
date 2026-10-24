@@ -207,18 +207,27 @@ class HookDispatcher:
         current_kwargs: Dict[str, Any] = dict(kwargs)
         dispatch_result = HookDispatchResult(hook_name=normalized_hook_name, kwargs=dict(current_kwargs))
         if is_shutdown_requested():
-            return dispatch_result
+            raise asyncio.CancelledError("Hook dispatch cancelled during application shutdown")
 
         resolved_supervisors = list(supervisors) if supervisors is not None else list(self._resolve_supervisors())
         hook_spec = self.get_hook_spec(normalized_hook_name)
         invocation_targets = self._collect_invocation_targets(normalized_hook_name, resolved_supervisors)
+
+        if normalized_hook_name == "extension.policy.resolve":
+            from fnmatch import fnmatchcase
+            route = f"{current_kwargs.get('feature', '')}.{current_kwargs.get('action', '')}"
+            invocation_targets = [t for t in invocation_targets if any(
+                fnmatchcase(route, pattern) for pattern in t.entry.metadata.get("policy_routes", [])
+            )]
+            if len(invocation_targets) > 1:
+                raise ValueError(f"Multiple extension providers for {route}")
 
         if not invocation_targets:
             return dispatch_result
 
         for target in invocation_targets:
             if is_shutdown_requested():
-                return dispatch_result
+                raise asyncio.CancelledError("Hook dispatch cancelled during application shutdown")
 
             if target.entry.is_observe:
                 self._schedule_observe_handler(
@@ -428,10 +437,7 @@ class HookDispatcher:
         timeout_ms = self._resolve_timeout_ms(hook_spec, target)
         request_args: Dict[str, Any] = {"hook_name": hook_name, **dict(kwargs)}
         if is_shutdown_requested():
-            return HookHandlerExecutionResult(
-                handler_name=target.entry.full_name,
-                plugin_id=target.entry.plugin_id,
-            )
+            raise asyncio.CancelledError("Hook invocation cancelled during application shutdown")
 
         circuit_permit = get_plugin_circuit_breaker().try_acquire(
             target.entry.plugin_id,
@@ -468,6 +474,10 @@ class HookDispatcher:
                 error_message=error_message,
             )
         except RPCError as exc:
+            if exc.code == ErrorCode.E_SHUTTING_DOWN or (
+                is_shutdown_requested() and exc.code == ErrorCode.E_PLUGIN_CRASHED
+            ):
+                raise asyncio.CancelledError("Hook RPC cancelled during application shutdown") from exc
             if self._should_record_circuit_failure(exc):
                 get_plugin_circuit_breaker().record_failure(circuit_permit, str(exc))
             error_message = f"HookHandler {target.entry.full_name} 执行失败: {exc}"
@@ -527,7 +537,10 @@ class HookDispatcher:
         if raw_value is None:
             return None
         if isinstance(raw_value, dict):
-            return dict(raw_value)
+            modified_kwargs = dict(raw_value)
+            # hook_name identifies the RPC dispatch, not a business argument to replay.
+            modified_kwargs.pop("hook_name", None)
+            return modified_kwargs
         logger.warning("HookHandler 返回的 modified_kwargs 不是字典，已忽略")
         return None
 

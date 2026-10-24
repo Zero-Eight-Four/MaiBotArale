@@ -25,9 +25,11 @@ from src.common.data_models.llm_service_data_models import (
 from src.config.config import config_manager
 from src.config.model_configs import APIProvider, ModelInfo, TaskConfig
 from src.llm_models.exceptions import (
+    EmbeddingQuotaCooldownError,
     EmptyResponseException,
     LLMTaskTimeoutError,
     ModelAttemptFailed,
+    ModelResponseTerminatedError,
     NetworkConnectionError,
     ReqAbortException,
     RespNotOkException,
@@ -396,6 +398,7 @@ class LLMOrchestrator:
         voice_base64: str,
         *,
         session_id: str = "",
+        audio_options: Dict[str, Any] | None = None,
     ) -> LLMAudioTranscriptionResult:
         """为语音生成转录响应。
 
@@ -409,6 +412,7 @@ class LLMOrchestrator:
         execution_result = await self._execute_request(
             request_type=RequestType.AUDIO,
             audio_base64=voice_base64,
+            audio_options=audio_options,
             session_id=session_id,
         )
         return LLMAudioTranscriptionResult(text=execution_result.api_response.content or None)
@@ -795,6 +799,7 @@ class LLMOrchestrator:
         audio_base64: str,
         trace_context: RequestTraceContext,
         max_tokens: Optional[int] = None,
+        audio_options: Dict[str, Any] | None = None,
     ) -> AudioTranscriptionRequest:
         """构建统一音频转录请求对象。
 
@@ -810,7 +815,7 @@ class LLMOrchestrator:
             model_info=model_info,
             audio_base64=audio_base64,
             max_tokens=max_tokens,
-            extra_params=dict(model_info.extra_params),
+            extra_params={**model_info.extra_params, **(audio_options or {})},
             trace_context=trace_context,
         )
 
@@ -851,6 +856,7 @@ class LLMOrchestrator:
         image_preprocess_version: str | None,
         audio_base64: str | None,
         trace_context: RequestTraceContext,
+        audio_options: Dict[str, Any] | None = None,
     ) -> ClientRequest:
         """按请求类型构建统一客户端请求对象。
 
@@ -911,6 +917,7 @@ class LLMOrchestrator:
             return self._build_audio_transcription_request(
                 model_info=model_info,
                 audio_base64=audio_base64,
+                audio_options=audio_options,
                 trace_context=trace_context,
                 max_tokens=max_tokens,
             )
@@ -1057,6 +1064,14 @@ class LLMOrchestrator:
         retry_remain = max(1, retry_remain)
         max_attempts = retry_remain
         model_info = request.model_info
+        from src.plugin_runtime.policy_bridge import resolve_policy
+        region_key = hashlib.sha256(json.dumps([
+            api_provider.name, api_provider.base_url, api_provider.api_key,
+            model_info.model_identifier, self.request_type,
+        ]).encode()).hexdigest()
+        handled, admission = await resolve_policy("model", "region_prepare", {"key": region_key, "now": time.time()})
+        if handled and admission.get("allow") is False:
+            raise ModelResponseTerminatedError("unsupported_location_cooldown", status_code=400)
         original_response_request = request if isinstance(request, ResponseRequest) else None
         active_request: ClientRequest = request
         if isinstance(active_request, EmbeddingRequest):
@@ -1116,8 +1131,18 @@ class LLMOrchestrator:
                 retry_remain -= 1
                 task_display = self.request_type or "未知任务"
                 if retry_remain <= 0:
+                    from src.plugin_runtime.policy_bridge import resolve_policy
+
+                    handled, policy = await resolve_policy("model", "empty_response", {
+                        "task": self.request_type, "model_name": model_info.name,
+                        "attempt": max_attempts,
+                    })
+                    if handled and isinstance(policy, dict) and policy.get("retry") is True and max_attempts < 3:
+                        retry_remain = 1
+                        max_attempts += 1
+                if retry_remain <= 0:
                     logger.error(
-                        f"任务 '{task_display}' 的模型 '{model_info.name}' 在多次出现空回复后仍然失败。{original_error_info}"
+                        f"任务 '{task_display}' 的模型 '{model_info.name}' 在 {max_attempts} 次尝试后仍收到空响应。{original_error_info}"
                     )
                     raise ModelAttemptFailed(f"模型 '{model_info.name}' 重试耗尽", original_exception=e) from e
 
@@ -1183,7 +1208,21 @@ class LLMOrchestrator:
                 await asyncio.to_thread(update_failed_request_attempt, e, status="retrying", retry_interval=api_provider.retry_interval)
                 await asyncio.sleep(api_provider.retry_interval)
 
+            except ModelResponseTerminatedError:
+                # 明确终止/无候选不属于临时网络故障，交回调用方处理。
+                raise
+
+            except EmbeddingQuotaCooldownError:
+                # Provider 已给出恢复时间；不占用短重试、模型切换和错误通知队列。
+                raise
+
             except RespNotOkException as e:
+                # Region eligibility is a terminal error for this task, not a
+                # parameter retry or permission to replay it through a fallback.
+                detail = str(e.message or "") + " " + str(e.__cause__ or "")
+                if e.status_code == 400 and "User location is not supported for the API use" in detail:
+                    await resolve_policy("model", "region_failed", {"key": region_key, "now": time.time()})
+                    raise ModelResponseTerminatedError("unsupported_location", status_code=400) from e
                 await ensure_attempt_snapshot(e)
                 original_error_info = self._get_original_error_info(e)
                 task_display = self.request_type or "未知任务"
@@ -1349,6 +1388,7 @@ class LLMOrchestrator:
         image_mime_type: str | None = None,
         image_preprocess_version: str | None = None,
         audio_base64: str | None = None,
+        audio_options: Dict[str, Any] | None = None,
         interrupt_flag: asyncio.Event | None = None,
         session_id: str = "",
         force_stream_mode: bool = False,
@@ -1423,6 +1463,7 @@ class LLMOrchestrator:
                     image_mime_type=image_mime_type,
                     image_preprocess_version=image_preprocess_version,
                     audio_base64=audio_base64,
+                    audio_options=audio_options,
                     trace_context=trace_context,
                 )
                 if self.request_type.startswith("maisaka."):
@@ -1453,6 +1494,10 @@ class LLMOrchestrator:
                         f"LLMOrchestrator[{self.request_type}] 模型 model={model_info.name} 的请求已被外部信号中断"
                     )
                 raise e
+
+            except (ModelResponseTerminatedError, EmbeddingQuotaCooldownError):
+                self._adjust_model_usage(model_info.name, usage_penalty_delta=-1)
+                raise
 
             except ModelAttemptFailed as e:
                 last_exception = e.original_exception or e

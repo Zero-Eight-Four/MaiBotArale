@@ -1150,7 +1150,8 @@ class EmojiManager:
         )
 
     async def periodic_emoji_maintenance(self) -> None:
-        """Run emoji maintenance tasks periodically."""
+        """Run bounded emoji maintenance batches periodically."""
+        scan_after = ""
         while True:
             wait_seconds = max(global_config.emoji.check_interval * 60, 0)
             try:
@@ -1174,7 +1175,12 @@ class EmojiManager:
                         if record_path := _resolve_existing_emoji_path(record.full_path):
                             known_paths.add(record_path)
                 logger.info("[emoji_maintenance] Scanning data/emoji for new emojis...")
-                for emoji_file in EMOJI_DIR.iterdir():
+                # Rotate bounded batches so fast model failures cannot scan the entire backlog.
+                files = sorted(EMOJI_DIR.iterdir(), key=lambda path: path.name)
+                if scan_after:
+                    files = [path for path in files if path.name > scan_after] + [path for path in files if path.name <= scan_after]
+                attempted = 0
+                for emoji_file in files:
                     if not emoji_file.is_file():
                         continue
                     resolved_file = emoji_file.absolute().resolve()
@@ -1186,11 +1192,16 @@ class EmojiManager:
                             f"{global_config.emoji.max_emoji_size_mb:g} MB, skipping: {emoji_file.name}"
                         )
                         continue
+                    if attempted >= 10:
+                        break
+                    attempted += 1
+                    scan_after = emoji_file.name
                     try:
                         register_status = await self.register_emoji_by_filename(emoji_file)
                     except Exception as e:
                         logger.error(f"[emoji_maintenance] Failed to process {emoji_file.name}: {e}")
-                        register_status = "failed"
+                        # Wait for the next scheduled cycle instead of hammering an unavailable model.
+                        break
                     if register_status == "registered":
                         break
                     if register_status == "skipped":
@@ -1252,6 +1263,10 @@ class EmojiManager:
 
         if existing_emoji := self.get_emoji_by_hash(target_emoji.file_hash):
             logger.info(f"[register_emoji] Emoji already loaded in memory, skipping: {existing_emoji.file_name}")
+            return "skipped"
+
+        if self._emoji_num >= global_config.emoji.max_reg_num and not global_config.emoji.do_replace:
+            logger.info("[register_emoji] Emoji limit reached and replacement is disabled, skipping")
             return "skipped"
 
         if not target_emoji.description:

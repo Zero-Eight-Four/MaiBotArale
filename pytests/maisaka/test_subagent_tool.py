@@ -126,6 +126,11 @@ def _build_tool_ctx(responses: List[ChatResponse]) -> tuple[BuiltinToolRuntimeCo
             reasoning=thought,
         ),
     )
+    from types import MethodType
+    from src.maisaka.reasoning_engine import MaisakaReasoningEngine
+    engine._runtime = runtime
+    engine._tool_policy_cycle_id = "test-dispatch-cycle"
+    engine._invoke_tool_with_extension_policy = MethodType(MaisakaReasoningEngine._invoke_tool_with_extension_policy, engine)
     return BuiltinToolRuntimeContext(engine, runtime), registry, sub_agent_requests
 
 
@@ -366,3 +371,26 @@ def test_runtime_appends_subagent_result_as_latest_user_message() -> None:
     assert "部署需要 Python 3.12。" in result_message.visible_text
     assert "docs_search×2" in result_message.visible_text
     assert queued_messages == ["subagent-7:子代理任务结束"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_uses_dispatch_cycle_extension_budget(monkeypatch):
+    from src.plugin_runtime import policy_bridge
+    seen = []
+    async def policy(feature, action, payload):
+        seen.append(payload)
+        return True, {'blocked': True, 'reason': 'budget exhausted', 'metadata': {'extension_limited': True}}
+    monkeypatch.setattr(policy_bridge, 'resolve_policy', policy)
+    ctx, registry, _ = _build_tool_ctx([_response(calls=[('docs_search', {'query': 'test'})]), _response(text='budget exhausted')])
+    async def change_cycle_then_return(**kwargs):
+        ctx.engine._tool_policy_cycle_id = 'new-parent-cycle'
+        return _response(calls=[('docs_search', {})]) if not seen else _response(text='budget exhausted')
+    ctx.runtime.run_sub_agent = change_cycle_then_return
+    result = await subagent.handle_tool(ctx, _invocation('test', ['docs_search']))
+    assert result.success and not registry.invocations
+    assert seen[0]['cycle_id'] == 'test-dispatch-cycle'
+
+
+def test_subagent_cannot_send_or_set_reminders():
+    for name in ['set_reminder', 'cancel_reminder', 'mai_life_browse_web', 'send_poke', 'upload_group_file']:
+        assert not subagent._is_grantable(ToolSpec(name=name, description='action'))

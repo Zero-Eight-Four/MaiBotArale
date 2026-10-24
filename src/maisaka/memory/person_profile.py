@@ -248,6 +248,7 @@ async def build_person_profile_injection_messages(
         try:
             payload = await memory_service.profile_admin(
                 action="query",
+                chat_id=anchor_message.session_id,
                 person_id=candidate.person_id,
                 limit=PROFILE_QUERY_LIMIT,
                 context_text=context_text,

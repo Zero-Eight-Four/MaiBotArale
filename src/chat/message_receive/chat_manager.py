@@ -174,11 +174,20 @@ class ChatManager:
         self._save_session(new_session)
         return new_session
 
+    @staticmethod
+    def get_message_peer_user_id(message: "SessionMessage") -> str:
+        """Use NapCat's actual private recipient while retaining the bot as sender."""
+        sender_id = message.message_info.user_info.user_id
+        if not message.message_info.group_info and message.account_id and sender_id == message.account_id:
+            config = message.message_info.additional_config or {}
+            return str(config.get("platform_io_target_user_id") or sender_id)
+        return sender_id
+
     def register_message(self, message: "SessionMessage"):
         platform = message.platform
         if not platform:
             raise ValueError("消息缺少平台信息")
-        user_id = message.message_info.user_info.user_id
+        user_id = self.get_message_peer_user_id(message)
         group_id = message.message_info.group_info.group_id if message.message_info.group_info else None
         route_key = RouteKeyFactory.from_session_message(message)
         account_id, scope = route_key.account_id, route_key.scope
@@ -222,6 +231,9 @@ class ChatManager:
                 session.user_cardname = None
                 changed = True
             return changed
+
+        if message.account_id and user_info.user_id == message.account_id:
+            return changed  # Own reports cannot rename the private peer to the bot.
 
         user_nickname = self._normalize_identity_text(user_info.user_nickname)
         user_cardname = self._normalize_identity_text(user_info.user_cardname)
@@ -285,7 +297,8 @@ class ChatManager:
         elif session.user_nickname:
             return f"{session.user_nickname}的私聊"
         elif session.context and session.context.message and session.context.message.message_info.user_info:
-            nickname = session.context.message.message_info.user_info.user_nickname
+            user_info = session.context.message.message_info.user_info
+            nickname = user_info.user_nickname if user_info.user_id == session.user_id else session.user_id
             return f"{nickname}的私聊"
         return None
 

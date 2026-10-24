@@ -107,12 +107,14 @@ async def handle_tool(
         if person_id:
             payload = await memory_service.profile_admin(
                 action="query",
+                chat_id=tool_ctx.runtime.session_id,
                 person_id=person_id,
                 limit=limit,
             )
         else:
             payload = await memory_service.profile_admin(
                 action="query",
+                chat_id=tool_ctx.runtime.session_id,
                 person_keyword=person_name,
                 limit=limit,
             )

@@ -112,7 +112,7 @@ class _FakePlatformIOManager:
 
     def build_route_key_from_message(self, message: Any) -> Any:
         del message
-        return SimpleNamespace(platform="qq")
+        return SimpleNamespace(platform="qq", account_id="bot-qq")
 
     async def send_message(self, message: Any, route_key: Any, metadata: Dict[str, Any]) -> Any:
         del message, metadata

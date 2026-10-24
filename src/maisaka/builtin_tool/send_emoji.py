@@ -409,8 +409,20 @@ async def _select_emoji_with_sub_agent(
     if selection_metadata is not None:
         selection_metadata["prompt_html_uri"] = response.prompt_html_uri
 
+    from src.plugin_runtime.policy_bridge import resolve_policy
+
+    selection_content = response.content or ""
+    handled, policy = await resolve_policy("emoji", "selection_result", {
+        "content": selection_content, "candidate_count": len(sampled_emojis),
+    })
+    if handled and isinstance(policy, dict):
+        if policy.get("skip") is True:
+            if selection_metadata is not None:
+                selection_metadata["reason"] = str(policy.get("reason") or "未得到有效的表情包选择")
+            return None, str(policy.get("reason") or "未得到有效的表情包选择，本次不发送")
+        selection_content = str(policy.get("content") or "")
     try:
-        selection = EmojiSelectionResult.model_validate_json(response.content or "")
+        selection = EmojiSelectionResult.model_validate_json(selection_content)
     except Exception as exc:
         logger.warning(f"{tool_ctx.runtime.log_prefix} 表情包子代理结果解析失败，将回退到候选首项: {exc}")
         if selection_metadata is not None:

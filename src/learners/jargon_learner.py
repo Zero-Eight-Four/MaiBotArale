@@ -8,7 +8,7 @@ import re
 
 from src.chat.utils.utils import is_bot_self
 from src.common.data_models.llm_service_data_models import LLMResponseResult
-from src.common.data_models.message_component_data_model import EmojiComponent, MessageSequence, ReplyComponent
+from src.common.data_models.message_component_data_model import EmojiComponent, MessageSequence, ReplyComponent, TextComponent
 from src.common.logger import get_logger
 from src.config.config import global_config
 from src.llm_models.payload_content.context_item import ContextItem, ContextItemBuilder, RoleType
@@ -622,7 +622,11 @@ class JargonLearner:
             )
             return False
 
-        saved, updated = await jargon_miner.process_extracted_entries(entries)
+        sources = [{"text": " ".join(part.text for part in item.original_message.raw_message.components
+                                    if isinstance(part, TextComponent)),
+                    "platform": item.original_message.platform,
+                    "message_id": item.original_message.message_id} for item in messages]
+        saved, updated = await jargon_miner.process_extracted_entries(entries, sources=sources)
         # 展示本批交给黑话矿工处理的候选，不能把候选数量当成新增词条数量。
         if learned_contents is not None:
             learned_contents.extend(str(entry["content"]) for entry in entries)

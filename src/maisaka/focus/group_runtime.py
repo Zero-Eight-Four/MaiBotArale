@@ -387,14 +387,14 @@ class FocusGroupRuntime:
             runtime._agent_state = runtime._STATE_WAIT if self._wait_until is not None else runtime._STATE_RUNNING
             runtime._update_stage_status(stage, f"Focus 共享组 · {detail}", wait_until=self._wait_until)
 
-    def _take_ready_inputs(self) -> List[FocusContextEntry]:
+    async def _take_ready_inputs(self) -> List[FocusContextEntry]:
         entries = []
         for sid in list(self._ready):
             if sid not in self.members:
                 continue
             self._ready.discard(sid)
             entries.extend(self._pending.pop(sid, []))
-            self.members[sid]._collect_pending_messages()
+            await self.members[sid]._collect_pending_messages()
             self.members[sid]._clear_forced_turn_state()
         entries.sort(key=lambda entry: entry.sequence)
         self.entries.extend(entries)
@@ -481,7 +481,7 @@ class FocusGroupRuntime:
                     self._event.clear()
                     await self._event.wait()
                     continue
-                self._take_ready_inputs()
+                await self._take_ready_inputs()
                 await self._run_turn()
         except asyncio.CancelledError:
             raise
@@ -498,13 +498,13 @@ class FocusGroupRuntime:
         for _ in range(MAX_INTERNAL_ROUNDS):
             if self._closed or self._wait_until is not None:
                 return
-            self._take_ready_inputs()
+            await self._take_ready_inputs()
             await self._compact()
             await self.tools.refresh()
             generation = self._generation
             references = await self._build_references()
             # 整理参考信息期间到达的就绪输入也接入本次请求；请求发出后使用固定快照。
-            self._take_ready_inputs()
+            await self._take_ready_inputs()
             related = set(self.members)
             covered = [(sid, sequence) for entry in self.entries for sid, sequence in entry.progress.items()]
             history = self.history

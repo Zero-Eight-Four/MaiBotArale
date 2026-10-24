@@ -36,6 +36,7 @@ from src.common.data_models.message_component_data_model import (
     VoiceComponent,
 )
 from src.common.logger import get_logger
+from src.common.shutdown import is_shutdown_requested
 from src.common.utils.utils_message import MessageUtils
 from src.config.config import global_config
 from src.platform_io import DeliveryBatch, DriverKind, get_platform_io_manager
@@ -847,6 +848,8 @@ async def _send_via_platform_io(
     Returns:
         bool: 发送成功时返回 ``True``。
     """
+    if is_shutdown_requested():
+        raise asyncio.CancelledError("Sending cancelled during application shutdown")
     before_send_result, message = await _invoke_send_hook(
         "send_service.before_send",
         message,
@@ -889,6 +892,8 @@ async def _send_via_platform_io(
             reply_message_id=reply_message_id,
             reply_message=reply_message,
         )
+        if is_shutdown_requested():
+            raise asyncio.CancelledError("Sending cancelled during application shutdown")
         delivery_batch = await platform_io_manager.send_message(
             message,
             route_key,
@@ -901,23 +906,28 @@ async def _send_via_platform_io(
     sent = bool(delivery_batch.has_success)
     if sent:
         await _apply_successful_delivery_receipt(message, delivery_batch)
-        await _dispatch_adapter_callbacks(delivery_batch)
-    await _invoke_send_hook(
-        "send_service.after_send",
-        message,
-        sent=sent,
-        typing=typing,
-        set_reply=set_reply,
-        reply_message_id=reply_message_id,
-        storage_message=storage_message,
-        show_log=show_log,
-    )
+        # A confirmed platform delivery must be persisted even if shutdown starts
+        # before optional callbacks/hooks. Its ID is also needed for echo dedup.
+        if storage_message:
+            await _store_sent_message(message)
+        if not is_shutdown_requested():
+            await _dispatch_adapter_callbacks(delivery_batch)
+    if not is_shutdown_requested():
+        await _invoke_send_hook(
+            "send_service.after_send",
+            message,
+            sent=sent,
+            typing=typing,
+            set_reply=set_reply,
+            reply_message_id=reply_message_id,
+            storage_message=storage_message,
+            show_log=show_log,
+        )
 
     if delivery_batch.has_success:
         _record_sent_emoji_usage(message)
-        if storage_message:
-            await _store_sent_message(message)
-        await _notify_memory_automation_on_message_sent(message)
+        if not is_shutdown_requested():
+            await _notify_memory_automation_on_message_sent(message)
         should_log_delivery = show_log and any(
             receipt.driver_kind != DriverKind.LOCAL
             for receipt in delivery_batch.sent_receipts

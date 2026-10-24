@@ -167,6 +167,12 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._internal_loop_task: Optional[asyncio.Task] = None
         self._message_turn_scheduled = False
         self._deferred_message_turn_task: Optional[asyncio.Task[None]] = None
+        self._message_schedule_task: Optional[asyncio.Task[None]] = None
+        self._message_schedule_again = False
+        self._context_revision = 0
+        self._input_version = 0
+        self._extension_sequence = 0
+        self._message_debounce_seconds = 1.0
         self._fixed_message_debouncer = MessageDebouncer()
         self._message_debounce_was_enabled = False
         self._last_message_received_at = 0.0
@@ -537,6 +543,9 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         # 否则后台服务退出期间仍可能继续规划和调用即将销毁的插件。
         if self._internal_loop_task is not None:
             self._internal_loop_task.cancel()
+        if self._message_schedule_task is not None:
+            self._message_schedule_task.cancel()
+            await asyncio.gather(self._message_schedule_task, return_exceptions=True)
         await focus_mode_manager.detach(self)
         self._fixed_message_debouncer.consume()
         self._mark_message_turn_unscheduled()
@@ -582,6 +591,15 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             )
 
             user_info = message.message_info.user_info
+            if message.message_id and any(
+                isinstance(item, SessionBackedMessage)
+                and item.message_id == message.message_id
+                and item.original_message is not None
+                and item.original_message.platform == message.platform
+                and item.original_message.message_info.user_info.user_id == user_info.user_id
+                for item in self._chat_history
+            ):
+                return False
             speaker_name = user_info.user_cardname or user_info.user_nickname or user_info.user_id
             include_chat_id = self._is_focus_mode_active_for_current_chat()
             planner_prefix = build_planner_prefix(
@@ -593,7 +611,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
                 quote_ids=extract_quote_ids_from_message_sequence(message.raw_message),
                 include_message_id=not message.is_notify and bool(message.message_id),
                 include_chat_id=include_chat_id,
-                is_self_message=source_kind == "guided_reply",
+                is_self_message=is_bot_self(message.platform, user_info.user_id),
             )
             history_message = SessionBackedMessage.from_session_message(
                 message,
@@ -1008,11 +1026,30 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         """按聊天串行登记，避免媒体构建期间同一条消息重复进入共享上下文。"""
         if self._focus_group is not None and self._focus_group.has_message(self.session_id, message.message_id):
             return
+        # 自身上报与发送链路使用同一历史入口，不作为新的用户消息触发规划。
+        if not message.is_notify and message.account_id and message.message_info.user_info.user_id == message.account_id:
+            self.append_sent_message_to_chat_history(message)
+            return
+        from src.plugin_runtime.policy_bridge import resolve_policy
+        handled, policy = await resolve_policy("conversation", "classify", {
+            "session_id": self.session_id, "text": message.processed_plain_text or "",
+        })
+        if handled and isinstance(policy, dict):
+            self._message_debounce_seconds = max(0.0, min(30.0, float(policy.get("debounce_seconds", 1))))
+            message.extension_traits = {k: policy.get(k) is True for k in ("direct_request", "request_or_correction")}
+        handled, policy = await resolve_policy("chat", "classify", {
+            "platform": message.platform, "user_id": str(message.message_info.user_info.user_id),
+            "group_id": str(self.chat_stream.group_id or ""), "is_group_chat": self.chat_stream.is_group_session,
+        })
+        if handled and isinstance(policy, dict):
+            message.extension_chat_policy = policy
         if self._running:
             self._ensure_background_tasks_running()
         if message.received_at is None:
             raise ValueError("入站消息缺少主程序记录的 received_at")
         self._quote_counter.record(message)
+        if not is_bot_self(message.platform, message.message_info.user_info.user_id):
+            self._input_version += 1
         received_at = message.received_at.timestamp()
         # 媒体预处理可能使较早收到的消息较晚入队，不能回退静默窗口。
         self._last_message_received_at = max(self._last_message_received_at, received_at)
@@ -1027,7 +1064,8 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
                 self._chat_history.append(history_message)
             await self._focus_group.register_message(self, message, history_message)
             return
-        self._request_planner_interrupt_for_message(message)
+        event = await self._conversation_policy("received", message=message)
+        self._request_planner_interrupt_for_message(message, allowed=event.get("interrupt"))
         if self._running:
             self._schedule_message_turn()
 
@@ -1036,9 +1074,11 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             self.session_id, is_group_chat=self.chat_stream.is_group_session
         )
 
-    def _request_planner_interrupt_for_message(self, message: SessionMessage) -> None:
-        """快速反应模式下，用新消息打断运行中的 Planner。"""
-        if not global_config.chat.reply_timing.planner_message_steering or self._agent_state != self._STATE_RUNNING:
+    def _request_planner_interrupt_for_message(self, message: SessionMessage, *, allowed: Optional[bool] = None) -> None:
+        """打断运行中的 Planner；实验性消息引导不限制连续打断次数。"""
+        if self._agent_state != self._STATE_RUNNING:
+            return
+        if allowed is False or (allowed is None and not global_config.chat.reply_timing.planner_message_steering):
             return
 
         request_result = self._planner_interrupt.request()
@@ -1191,10 +1231,13 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         if detected_mentioned:
             message.is_mentioned = True
 
+        policy = getattr(message, "extension_chat_policy", None)
+        if isinstance(policy, dict) and policy.get("force_disabled") is True:
+            return
         should_force_reply = (
             reply_probability_boost >= 1.0
-            or (message.is_at and global_config.chat.reply_timing.inevitable_at_reply)
-            or (message.is_mentioned and global_config.chat.reply_timing.mentioned_bot_reply)
+            or (message.is_at and (global_config.chat.reply_timing.inevitable_at_reply or (isinstance(policy, dict) and policy.get("inevitable_at_reply") is True)))
+            or (message.is_mentioned and (global_config.chat.reply_timing.mentioned_bot_reply or (isinstance(policy, dict) and policy.get("mentioned_bot_reply") is True)))
         )
         if not should_force_reply or (not message.is_at and not message.is_mentioned):
             return
@@ -1599,10 +1642,10 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             newly_discovered_tool_names.append(normalized_name)
         return newly_discovered_tool_names
 
-    def record_planner_reply(self) -> None:
-        """记录 Planner 成功完成一次回复，一次回复拆成多条消息发送也只计一次。"""
+    async def record_planner_reply(self, target_message: Optional[SessionMessage] = None, *, event_id="") -> None:
+        """记录 Planner 成功调用了一次 reply，一次调用拆成多条消息发送也只计一次。"""
 
-        self._message_turn_scheduler.record_reply()
+        await self._message_turn_scheduler.record_reply(target_message,event_id=event_id)
 
     def _has_pending_messages(self) -> bool:
         return self._last_processed_index < len(self.message_cache)
@@ -1611,9 +1654,22 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         """为当前待处理消息安排一次内部 turn。"""
         if self._focus_group is not None:
             return
-        self._message_turn_scheduler.schedule_message_turn()
+        self._message_schedule_again = True
+        if self._message_schedule_task is not None and not self._message_schedule_task.done():return
+        async def schedule():
+            try:
+                while self._message_schedule_again and self._running:
+                    self._message_schedule_again=False
+                    await self._message_turn_scheduler.schedule_message_turn()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(f"{self.log_prefix} 扩展调度失败，消息保留待处理")
+            finally:
+                self._message_schedule_task=None
+        self._message_schedule_task=asyncio.create_task(schedule())
 
-    def _collect_pending_messages(self) -> list[SessionMessage]:
+    async def _collect_pending_messages(self) -> list[SessionMessage]:
         """从消息缓存中收集一批尚未处理的消息。"""
         start_index = self._last_processed_index
         pending_messages = self.message_cache[start_index:]
@@ -1622,6 +1678,8 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
 
         self._last_processed_index = len(self.message_cache)
         self._fixed_message_debouncer.consume()
+        self._context_revision += 1
+        await self._conversation_policy("consumed")
         # logger.info(
         # f"{self.log_prefix} 已从消息缓存区[{start_index}:{self._last_processed_index}] "
         # f"收集 {len(pending_messages)} 条新消息"
@@ -1648,6 +1706,23 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
                 await asyncio.wait_for(debouncer.changed.wait(), timeout=min(remaining, 0.5))
             except TimeoutError:
                 pass
+
+    async def _conversation_policy(self, action: str, *, message=None, target=None, parameters=None) -> dict:
+        """向扩展提供只读会话快照；只在宿主执行调度和发送。"""
+        from src.plugin_runtime.policy_bridge import resolve_policy
+        def record(m):
+            user=str(m.message_info.user_info.user_id)
+            return {"message_id":str(m.message_id),"platform":m.platform,"user_id":user,
+                "is_self":is_bot_self(m.platform,user),"is_at":m.is_at,"is_mentioned":m.is_mentioned,
+                "traits":getattr(m,"extension_traits",{})}
+        self._extension_sequence += 1
+        handled,result=await resolve_policy("flow",action,{"session_id":self.session_id,"now":time.time(),
+            "revision":self._context_revision,"input_version":self._input_version,"event_sequence":self._extension_sequence,
+            "is_group":self.chat_stream.is_group_session,"last_received_at":self._last_message_received_at,
+            "message":record(message) if message else None,"target":record(target) if target else None,
+            "pending":[record(m) for m in self.message_cache[self._last_processed_index:]],"parameters":parameters or {}})
+        if handled and not isinstance(result,dict):raise ValueError("Invalid conversation extension result")
+        return result if handled else {}
 
     def _is_message_debounce_enabled(self) -> bool:
         return global_config.chat.reply_timing.message_debounce_mode != "off"

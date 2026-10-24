@@ -3,6 +3,10 @@
 from rich.console import Console
 from rich.theme import Theme
 
+import sys
+
+from src.common.console_output import get_console_stream
+
 custom_theme = Theme(
     {
         "info": "cyan",
@@ -14,4 +18,4 @@ custom_theme = Theme(
     }
 )
 
-console = Console(theme=custom_theme)
+console = Console(theme=custom_theme, file=get_console_stream(sys.stdout))

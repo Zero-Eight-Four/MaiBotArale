@@ -7,6 +7,7 @@ import asyncio
 import json
 import traceback
 
+from src.chat.replyer.maisaka_expression_selector import MaisakaExpressionSelector
 from src.chat.replyer.replyer_manager import replyer_manager
 from src.chat.message_receive.message import SessionMessage
 from src.chat.utils.utils import is_bot_self
@@ -113,6 +114,7 @@ async def _run_expression_selector(tool_ctx: BuiltinToolRuntimeContext, system_p
         context_message_limit=10,
         system_prompt=system_prompt,
         request_kind="expression_selector",
+        response_format=MaisakaExpressionSelector.selection_response_format(),
     )
     return (response.content or "").strip()
 
@@ -371,6 +373,26 @@ def _with_duplicate_target_reply_reminder(
     return updated_args
 
 
+async def _apply_reply_execution_policy(tool_ctx, target_message, parameters):
+    runtime=tool_ctx.runtime
+    # 原子提交之前核对版本；请求期间若有消息到达，重新取快照判定。
+    for _ in range(3):
+        version=runtime._input_version
+        result=await runtime._conversation_policy("prepare_reply",target=target_message,parameters=parameters)
+        if version==runtime._input_version:break
+    else:result={"decision":"replan","pause_execution":True,"reason":"输入持续变化，请合并后重新规划"}
+    decision=result.get("decision","allow")
+    if decision=="skip":return tool_ctx.build_success_result("reply",str(result.get("reason","")),metadata={"extension_skip":True})
+    if decision=="replan":
+        if result.get("pause_execution"):
+            runtime._enter_stop_state()
+            if not runtime._message_turn_scheduled:runtime._enqueue_message_turn()
+        return tool_ctx.build_failure_result("reply",str(result.get("reason","")),
+            metadata={"stale_reply":True,"pause_execution":bool(result.get("pause_execution"))})
+    if decision!="allow":raise ValueError("Invalid reply execution decision")
+    return None
+
+
 async def handle_tool(
     tool_ctx: BuiltinToolRuntimeContext,
     invocation: ToolInvocation,
@@ -420,10 +442,29 @@ async def execute_reply(
         return tool_ctx.build_failure_result(
             "reply", "新表情包发送逻辑未开启，请使用 send_emoji 工具。"
         )
+    from src.plugin_runtime.tool_specs import extend_tool_spec
+    availability = ToolAvailabilityContext(
+        session_id=tool_ctx.runtime.session_id,
+        stream_id=tool_ctx.runtime.session_id,
+        platform=tool_ctx.runtime.chat_stream.platform,
+        is_group_chat=tool_ctx.runtime.chat_stream.is_group_session,
+        group_id=tool_ctx.runtime.chat_stream.group_id,
+        user_id=tool_ctx.runtime.chat_stream.user_id,
+    )
+    declaration = await extend_tool_spec(get_tool_spec(availability), availability)
     reply_tool_args = {
         key: value
         for key, value in invocation_arguments.items()
-        if key not in _REPLY_TOOL_INTERNAL_ARGUMENTS
+        if key not in _REPLY_TOOL_INTERNAL_ARGUMENTS and key not in declaration.metadata.get("extension_private_parameters",[])
+    }
+    # 提供给回复 Hook 的可信调用上下文，不进入模型回复参考正文。
+    reply_tool_args["_host_context"] = {
+        "stream_id": tool_ctx.runtime.session_id,
+        "account_id": tool_ctx.runtime.chat_stream.account_id,
+        "user_id": tool_ctx.runtime.chat_stream.user_id,
+        "platform": tool_ctx.runtime.chat_stream.platform,
+        "is_group_chat": tool_ctx.runtime.chat_stream.is_group_session,
+        "logical_turn_id": tool_ctx.engine._active_logical_turn_id,
     }
     if not _use_expression_intent():
         reply_tool_args.pop("expression_intent", None)
@@ -444,12 +485,13 @@ async def execute_reply(
             f"未找到要回复的目标消息，msg_id={to_display_message_id(target_message_id)}",
         )
 
+    draft_revision=tool_ctx.runtime._context_revision
+    execution_parameters={**invocation_arguments,"_host_draft_revision":draft_revision}
+    if deferred := await _apply_reply_execution_policy(tool_ctx,target_message,execution_parameters):
+        return deferred
+
     extension_execution = ReplyExtensionExecution(
-        context=ToolAvailabilityContext(
-            session_id=tool_ctx.runtime.session_id,
-            stream_id=tool_ctx.runtime.session_id,
-            platform=tool_ctx.runtime.chat_stream.platform,
-        ),
+        context=availability,
         reply_message_id=target_message_id,
         call_id=call_id,
     )
@@ -496,6 +538,9 @@ async def execute_reply(
     replyer_chat_history = list(tool_ctx.runtime._chat_history)
     if config_module.global_config.debug.replyer_retro_prompt:
         replyer_chat_history = await tool_ctx.runtime.build_retro_reply_history()
+    from src.plugin_runtime.context_views import prepare_history
+    history_projection = await prepare_history(replyer_chat_history, tool_ctx.runtime.session_id)
+    replyer_chat_history = list(history_projection.messages)
     previous_target_reply = _find_recent_reply_to_target(replyer_chat_history, target_message_id)
     if previous_target_reply:
         reply_tool_args = _with_duplicate_target_reply_reminder(reply_tool_args, previous_target_reply)
@@ -506,6 +551,7 @@ async def execute_reply(
             stream_id=tool_ctx.runtime.session_id,
             reply_message=target_message,
             chat_history=replyer_chat_history,
+            _history_projection=history_projection,
             image_recognition_refresher=lambda history: (
                 tool_ctx.runtime._reasoning_engine._refresh_chat_history_visual_placeholders(
                     chat_history=history,
@@ -614,6 +660,9 @@ async def execute_reply(
                 metadata=_build_monitor_metadata(reply_result, extension_execution.reply_id),
             )
     reply_sequences = [item.sequence for item in reply_items]
+    if deferred := await _apply_reply_execution_policy(tool_ctx,target_message,execution_parameters):
+        return deferred
+
     reply_segments = [build_visible_text_from_sequence(sequence) for sequence in reply_sequences]
     combined_reply_text = "".join(reply_segments)
     reply_result.completion.response_text = combined_reply_text
@@ -691,6 +740,8 @@ async def execute_reply(
                         )
                     )
                     break
+                # Commit the flow receipt after the first confirmed send too.
+                await tool_ctx.runtime._conversation_policy("sent",target=target_message,parameters={"event_id":call_id,"prepared_revision":draft_revision})
                 sent_message_id = sent_message.message_id.strip()
                 if sent_message_id:
                     sent_message_ids.append(sent_message_id)
@@ -738,10 +789,11 @@ async def execute_reply(
 
     if tool_ctx.runtime.chat_stream.platform == CLI_PLATFORM_NAME:
         tool_ctx.append_guided_reply_to_chat_history(combined_reply_text)
-    tool_ctx.runtime.record_planner_reply()
+    await tool_ctx.runtime.record_planner_reply(target_message, event_id=call_id)
+    extension_receipt = await tool_ctx.runtime._conversation_policy("sent",target=target_message,parameters={"event_id":call_id,"prepared_revision":draft_revision})
     return tool_ctx.build_success_result(
         "reply",
-        reply_receipt,
+        reply_receipt + "\n" + str(extension_receipt.get("receipt_hint", "")),
         structured_content={
             "msg_id": target_message_id,
             "set_quote": set_quote,

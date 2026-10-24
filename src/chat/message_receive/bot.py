@@ -766,9 +766,12 @@ class ChatBot:
             route_key = RouteKeyFactory.from_session_message(message)
             account_id, scope = route_key.account_id, route_key.scope
 
+            if not group_info and user_info.user_id == account_id and chat_manager.get_message_peer_user_id(message) == account_id:
+                return  # Own notices/reports without a recipient cannot identify a private chat.
+
             session_id = SessionUtils.calculate_session_id(
                 message.platform,
-                user_id=message.message_info.user_info.user_id,
+                user_id=chat_manager.get_message_peer_user_id(message),
                 group_id=group_info.group_id if group_info else None,
                 account_id=account_id,
                 scope=scope,
@@ -853,7 +856,7 @@ class ChatBot:
             chat_manager.register_message(message)
 
             platform = message.platform
-            user_id = user_info.user_id
+            user_id = chat_manager.get_message_peer_user_id(message)
             group_id = group_info.group_id if group_info else None
             _ = await chat_manager.get_or_create_session(
                 platform,

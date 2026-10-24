@@ -9,7 +9,7 @@ services:
     # image: sengokucola/maibot:dev
     # image: infinitycat/maibot:dev
     environment:
-      - TZ=Asia/Shanghai
+      - TZ=Asia/Tokyo
       - EULA_AGREE=8e6e7d647f7f82d6ea98456b73908656
       - PRIVACY_AGREE=91e5db7659c560bc3545e63859b6ebc0
       - MAIBOT_LEGACY_0X_UPGRADE_CONFIRMED=1 # Docker 无法交互确认旧版升级迁移，默认跳过确认提示
@@ -55,7 +55,7 @@ services:
     environment:
       - NAPCAT_UID=1000
       - NAPCAT_GID=1000
-      - TZ=Asia/Shanghai
+      - TZ=Asia/Tokyo
     ports:
       - "6099:6099"
     volumes:

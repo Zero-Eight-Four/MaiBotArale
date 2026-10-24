@@ -82,6 +82,29 @@ class RespNotOkException(Exception):
             return f"未知的异常响应代码：{self.status_code}"
 
 
+class ModelResponseTerminatedError(RespNotOkException):
+    """上游没有可用候选或明确终止生成；不可重放或切换模型。"""
+
+    def __init__(self, reason: str, status_code: int = 422):
+        self.reason = reason
+        message = "地区不支持，本次模型任务已取消" if reason.startswith("unsupported_location") else f"上游未提供可用输出（{reason}）"
+        super().__init__(status_code, message)
+
+    def __str__(self):
+        return self.message
+
+
+class EmbeddingQuotaCooldownError(RespNotOkException):
+    """嵌入额度等待期：调用方应保留任务，不进行短间隔出站重试。"""
+
+    def __init__(self, retry_at: float):
+        self.retry_at = retry_at
+        super().__init__(429, "嵌入额度等待恢复，已暂停出站请求")
+
+    def __str__(self):
+        return self.message
+
+
 class ResponseContextException(Exception):
     """携带原始响应上下文的异常基类。"""
 

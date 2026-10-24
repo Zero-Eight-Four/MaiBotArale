@@ -28,6 +28,7 @@ from src.plugin_runtime.protocol.envelope import (
     RequestIdGenerator,
 )
 from src.plugin_runtime.protocol.errors import ErrorCode, RPCError
+from src.plugin_runtime.request_lifecycle import IncomingRequests, notify_cancel
 from src.plugin_runtime.transport.base import Connection, TransportServer
 
 _DEFAULT_LOGGER_NAME = "plugin_runtime.host.rpc_server"
@@ -60,6 +61,7 @@ class RPCServer:
         self._logger = get_logger(logger_name)
         self._connection_lost_callback = connection_lost_callback
 
+        self._incoming_requests = IncomingRequests()
         self._id_gen = RequestIdGenerator()
         self._connection: Optional[Connection] = None  # 当前活跃的 Runner 连接
 
@@ -201,6 +203,7 @@ class RPCServer:
         """
         if not self._connection or self._connection.is_closed:
             raise RPCError(ErrorCode.E_PLUGIN_CRASHED, "Runner 未连接")
+        connection = self._connection
         request_id = await self._id_gen.next()
         envelope = Envelope(
             request_id=request_id,
@@ -233,7 +236,11 @@ class RPCServer:
             # 等待响应
             timeout_sec = timeout_ms / 1000.0
             return await asyncio.wait_for(future, timeout=timeout_sec)
+        except asyncio.CancelledError:
+            await notify_cancel(connection, self._codec, envelope)
+            raise
         except asyncio.TimeoutError:
+            await notify_cancel(connection, self._codec, envelope)
             self._pending_requests.pop(request_id, None)
             self._pending_request_metadata.pop(request_id, None)
             raise RPCError(ErrorCode.E_TIMEOUT, f"请求 {method} 超时 ({timeout_ms}ms)") from None
@@ -243,6 +250,9 @@ class RPCServer:
             if isinstance(e, RPCError):
                 raise
             raise RPCError(ErrorCode.E_UNKNOWN, str(e)) from e
+        finally:
+            self._pending_requests.pop(request_id, None)
+            self._pending_request_metadata.pop(request_id, None)
 
     # ============ 内部方法 ============
     # ========= 发送循环 =========
@@ -390,9 +400,11 @@ class RPCServer:
                 self._handle_response(envelope)
             elif envelope.is_request():
                 # 异步处理请求（Runner 发来的能力调用）
-                task = asyncio.create_task(self._handle_request(envelope, conn))
+                task = self._incoming_requests.start(envelope, conn, lambda envelope=envelope: self._handle_request(envelope, conn))
                 self._tasks.append(task)
                 task.add_done_callback(lambda t: self._tasks.remove(t) if t in self._tasks else None)
+            elif envelope.is_broadcast() and envelope.method == "rpc.cancel":
+                self._incoming_requests.cancel(envelope, conn)
             elif envelope.is_broadcast():
                 task = asyncio.create_task(self._handle_broadcast(envelope))
                 self._tasks.append(task)
@@ -427,8 +439,12 @@ class RPCServer:
             return
 
         try:
-            response = await handler(envelope)
+            response = await self._incoming_requests.invoke(envelope, handler)
             await conn.send_frame(self._codec.encode_envelope(response))
+        except TimeoutError:
+            error_resp = envelope.make_error_response(ErrorCode.E_TIMEOUT.value, "RPC operation deadline exceeded")
+            if not conn.is_closed:
+                await conn.send_frame(self._codec.encode_envelope(error_resp))
         except RPCError as e:
             error_resp = envelope.make_error_response(e.code.value, e.message, e.details)
             await conn.send_frame(self._codec.encode_envelope(error_resp))

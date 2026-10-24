@@ -66,7 +66,12 @@ def engine(monkeypatch) -> MaisakaReasoningEngine:
         session_id="chat",
         log_prefix="[test]",
         _chat_history=[_history(_message("original"))],
-        chat_stream=SimpleNamespace(platform="test", is_group_session=True, group_id="group", user_id=""),
+        _input_version=0,
+        _context_revision=0,
+        _consecutive_wait_count=0,
+        _conversation_policy=AsyncMock(return_value={}),
+        record_planner_reply=AsyncMock(),
+        chat_stream=SimpleNamespace(platform="test", is_group_session=True, group_id="group", user_id="", account_id="bot"),
         _end_planner_continuation=Mock(),
         _reset_consecutive_wait_count=Mock(),
         _enter_stop_state=Mock(),
@@ -81,6 +86,7 @@ def engine(monkeypatch) -> MaisakaReasoningEngine:
         build_deferred_tools_reminder=lambda: "",
         _max_context_size=100,
         _cycle_counter=1,
+        _max_internal_rounds=6,
         _chat_loop_service=SimpleNamespace(select_llm_context_messages=lambda *a, **kw: ([], 0)),
     )
     result = MaisakaReasoningEngine(runtime)
@@ -404,7 +410,7 @@ async def test_shared_reply_service_preserves_extensions_attachments_and_send_co
     second_result = {"": _message("sent-2"), "empty_receipt": None, "exception": RuntimeError("发送失败")}[failure]
     send = AsyncMock(side_effect=[_message("sent-1"), second_result])
     monkeypatch.setattr(reply_module.send_service, "_send_to_target_with_message", send)
-    engine._runtime.record_planner_reply = Mock()
+    engine._runtime.record_planner_reply = AsyncMock()
     arguments = {
         "msg_id": target.message_id,
         "reply_reference": "指导正文",

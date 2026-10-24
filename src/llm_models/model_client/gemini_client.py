@@ -1,12 +1,16 @@
 # ruff: noqa: B025
 
+from hashlib import sha256
 from typing import Any, AsyncIterator, Callable, Coroutine, Dict, List, Optional, Tuple, cast
+from urllib.parse import urlsplit
 
 import asyncio
 import base64
 import binascii
 import io
 import json
+import math
+import time
 import uuid
 
 from google import genai
@@ -45,6 +49,7 @@ from src.common.logger import get_logger
 from src.common.http_client import get_shared_ssl_context
 from src.config.model_configs import APIProvider
 from src.llm_models.exceptions import (
+    EmbeddingQuotaCooldownError,
     EmptyResponseException,
     NetworkConnectionError,
     ReqAbortException,
@@ -81,6 +86,7 @@ from .base_client import (
     APIResponse,
     AudioTranscriptionRequest,
     EmbeddingRequest,
+    ImageEmbeddingRequest,
     ResponseRequest,
     UsageTuple,
     client_registry,
@@ -91,6 +97,7 @@ from ..request_snapshot import (
     save_failed_request_snapshot,
     serialize_audio_request_snapshot,
     serialize_embedding_request_snapshot,
+    serialize_image_embedding_request_snapshot,
     serialize_response_request_snapshot,
 )
 
@@ -133,6 +140,9 @@ GENERATE_CONFIG_RESERVED_EXTRA_PARAMS = {
     "enable_google_search",
     "transcription_prompt",
     "audio_mime_type",
+    "audio_language",
+    "audio_temperature",
+    "audio_transcription_mode",
 }
 """由当前客户端自行处理、不再直接透传给 `GenerateContentConfig` 的额外参数。"""
 
@@ -772,7 +782,7 @@ def _filter_generate_content_extra_params(extra_params: Dict[str, Any]) -> Dict[
     return filtered_params
 
 
-def _build_embed_content_config(extra_params: Dict[str, Any]) -> EmbedContentConfig:
+def _build_embed_content_config(extra_params: Dict[str, Any], *, model_identifier: str = "") -> EmbedContentConfig:
     """构建 Gemini 嵌入配置。
 
     Args:
@@ -781,7 +791,12 @@ def _build_embed_content_config(extra_params: Dict[str, Any]) -> EmbedContentCon
     Returns:
         EmbedContentConfig: Gemini 嵌入配置对象。
     """
-    config_payload: Dict[str, Any] = {"task_type": extra_params.get("task_type", "SEMANTIC_SIMILARITY")}
+    config_payload: Dict[str, Any] = {}
+    # Embedding 2 uses prompt instructions rather than a default task_type.
+    if "task_type" in extra_params:
+        config_payload["task_type"] = extra_params["task_type"]
+    elif not model_identifier.removeprefix("models/").startswith("gemini-embedding-2"):
+        config_payload["task_type"] = "SEMANTIC_SIMILARITY"
     for key in EMBED_CONFIG_SUPPORTED_EXTRA_PARAMS:
         if key == "task_type":
             continue
@@ -1161,55 +1176,99 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
         except Exception as exc:
             raise NetworkConnectionError(str(exc)) from exc
 
-    async def _execute_embedding_request(
-        self,
-        request: EmbeddingRequest,
+    async def _execute_embedding_request(self, request: EmbeddingRequest) -> Tuple[APIResponse, UsageTuple | None]:
+        """执行 Gemini 文本嵌入，复用原生 embedContent 链路。"""
+        return await self._execute_gemini_embedding_request(request, request.embedding_input)
+
+    async def _execute_image_embedding_request(
+        self, request: ImageEmbeddingRequest
     ) -> Tuple[APIResponse, UsageTuple | None]:
-        """执行 Gemini 文本嵌入请求。
+        """将图片字节和 MIME 类型作为 inlineData 发送到原生嵌入接口。"""
+        contents = Content(parts=[Part.from_bytes(data=request.image_bytes, mime_type=request.mime_type)])
+        response, usage = await self._execute_gemini_embedding_request(request, contents)
+        fingerprint = {
+            "protocol_version": "gemini_image_embedding_v1",
+            "endpoint": urlsplit(self.api_provider.base_url).path.rstrip("/") + "/models/{model}:batchEmbedContents",
+            "model": request.model_info.model_identifier,
+            "semantic_params": _build_embed_content_config(
+                request.extra_params, model_identifier=request.model_info.model_identifier
+            ).model_dump(mode="json", exclude_none=True),
+        }
+        response.request_protocol_hash = sha256(
+            json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return response, usage
 
-        Args:
-            request: 统一嵌入请求对象。
-
-        Returns:
-            Tuple[APIResponse, UsageTuple | None]: 统一响应对象与可选使用量信息。
-        """
+    async def _execute_gemini_embedding_request(
+        self, request: EmbeddingRequest | ImageEmbeddingRequest, contents: str | Content
+    ) -> Tuple[APIResponse, UsageTuple | None]:
+        """统一嵌入响应解析和错误快照；图片快照仅记录摘要。"""
         model_info = request.model_info
-        embedding_input = request.embedding_input
+        image_request = isinstance(request, ImageEmbeddingRequest)
+        from src.plugin_runtime.policy_bridge import resolve_policy
+        # 插件仅获得不透明凭据指纹，不能读取密钥。
+        cooldown_key = sha256((self.api_provider.base_url.rstrip("/")+"\n"+self.api_provider.api_key+"\n"+model_info.model_identifier).encode()).hexdigest()
+        handled, policy = await resolve_policy("model", "before_embedding", {"credential_fingerprint":cooldown_key})
+        if handled and policy.get("retry_at") is not None:
+            raise EmbeddingQuotaCooldownError(float(policy["retry_at"]))
+        serialized_request = (
+            serialize_image_embedding_request_snapshot(request)
+            if image_request
+            else serialize_embedding_request_snapshot(request)
+        )
         extra_params = request.extra_params
         snapshot_provider_request = {
             "base_url": self.api_provider.base_url,
-            "endpoint": "/models/{model}:embedContent",
+            "endpoint": "/models/{model}:batchEmbedContents",
             "method": "POST",
             "operation": "models.embed_content",
             "request_kwargs": {},
         }
 
         try:
-            embed_config = _build_embed_content_config(extra_params)
+            embed_config = _build_embed_content_config(extra_params, model_identifier=model_info.model_identifier)
             snapshot_provider_request["request_kwargs"] = {
                 "config": embed_config,
-                "contents": embedding_input,
+                "contents": (
+                    {"inline_data": {"mime_type": request.mime_type, "data": "[image bytes omitted]"}}
+                    if image_request
+                    else contents
+                ),
                 "model": model_info.model_identifier,
             }
             raw_response: EmbedContentResponse = await self.client.aio.models.embed_content(
                 model=model_info.model_identifier,
-                contents=embedding_input,
+                contents=contents,
                 config=embed_config,
             )
         except (ClientError, ServerError) as exc:
             status_code = int(getattr(exc, "code", 500) or 500)
+            retry_at = None
+            if status_code == 429:
+                handled, policy = await resolve_policy("model", "embedding_error", {
+                    "credential_fingerprint":cooldown_key,"details":exc.details})
+                if handled:retry_at=policy.get("retry_at")
             snapshot_path = await asyncio.to_thread(
                 save_failed_request_snapshot,
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=exc,
-                internal_request=serialize_embedding_request_snapshot(request),
+                internal_request=serialized_request,
                 model_info=model_info,
                 operation="models.embed_content",
                 provider_request=snapshot_provider_request,
                 trace_context=request.trace_context,
             )
-            wrapped_error = RespNotOkException(status_code, str(exc))
+            wrapped_error = (
+                EmbeddingQuotaCooldownError(retry_at)
+                if retry_at is not None
+                else RespNotOkException(status_code, str(exc))
+            )
+            if retry_at is not None:
+                logger.warning(
+                    f"嵌入模型 {model_info.name} 额度等待期，暂停出站请求至 "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(retry_at))}；原始错误已保存到快照"
+                )
             attach_request_snapshot(wrapped_error, snapshot_path)
             raise wrapped_error from exc
         except Exception as exc:
@@ -1220,7 +1279,7 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=exc,
-                internal_request=serialize_embedding_request_snapshot(request),
+                internal_request=serialized_request,
                 model_info=model_info,
                 operation="models.embed_content",
                 provider_request=snapshot_provider_request,
@@ -1237,14 +1296,18 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             raise wrapped_error from exc
 
         response = APIResponse(raw_data=raw_response)
-        if not raw_response.embeddings:
-            exc = RespParseException(raw_response, "Gemini 嵌入响应解析失败，缺少 embeddings 字段。")
+        if (
+            not raw_response.embeddings
+            or not raw_response.embeddings[0].values
+            or not all(math.isfinite(value) for value in raw_response.embeddings[0].values)
+        ):
+            exc = RespParseException(raw_response, "Gemini 嵌入响应解析失败，向量为空或包含非有限数值。")
             snapshot_path = await asyncio.to_thread(
                 save_failed_request_snapshot,
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=exc,
-                internal_request=serialize_embedding_request_snapshot(request),
+                internal_request=serialized_request,
                 model_info=model_info,
                 operation="models.embed_content",
                 provider_request=snapshot_provider_request,
@@ -1252,18 +1315,15 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             )
             attach_request_snapshot(exc, snapshot_path)
             raise exc
-        if raw_response.embeddings:
-            response.embedding = raw_response.embeddings[0].values
-        else:
-            raise RespParseException(raw_response, "响应解析失败，缺失 embeddings 字段")
+        response.embedding = raw_response.embeddings[0].values
 
         billable_character_count = 0
         if raw_response.metadata is not None:
             billable_character_count = getattr(raw_response.metadata, "billable_character_count", 0) or 0
         usage_record: UsageTuple = (
-            billable_character_count or len(embedding_input),
+            billable_character_count or (len(contents) if isinstance(contents, str) else 0),
             0,
-            billable_character_count or len(embedding_input),
+            billable_character_count or (len(contents) if isinstance(contents, str) else 0),
         )
         return response, usage_record
 
@@ -1316,7 +1376,7 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
                 tool_options=None,
                 response_format=None,
                 max_tokens=max_tokens,
-                temperature=None,
+                temperature=float(extra_params.get("audio_temperature", 0.0)),
                 extra_params=extra_params,
                 enable_google_search=False,
             )

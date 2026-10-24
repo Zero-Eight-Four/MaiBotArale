@@ -10,6 +10,8 @@ from sqlmodel import select
 
 from src.chat.message_receive.message import SessionMessage
 from src.chat.replyer.expression_vector_index import expression_vector_index
+from src.llm_models.exceptions import EmbeddingQuotaCooldownError
+from src.llm_models.payload_content.resp_format import RespFormat, RespFormatType
 from src.common.database.database import get_db_session
 from src.common.database.database_model import Expression, ModifiedBy
 from src.common.logger import get_logger
@@ -41,6 +43,29 @@ class MaisakaExpressionSelector:
     """负责在 replyer 侧完成表达方式筛选与子代理二次选择。"""
 
     _VECTOR_CLUSTER_POOL_SIZE = 16
+
+    @staticmethod
+    def selection_response_format() -> RespFormat:
+        """让 Provider 约束输出结构，避免选择任务生成普通聊天正文。"""
+        return RespFormat(
+            RespFormatType.JSON_SCHEMA,
+            schema={
+                "name": "expression_selection",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "selected_ids": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "maxItems": MAX_SELECTED_EXPRESSIONS,
+                        },
+                    },
+                    "required": ["selected_ids"],
+                    "additionalProperties": False,
+                },
+            },
+        )
 
     @staticmethod
     def _get_runtime_manager() -> Any:
@@ -300,7 +325,7 @@ class MaisakaExpressionSelector:
         }
         selected_ids: List[int] = []
         for candidate_id in raw_selected_ids:
-            if not isinstance(candidate_id, int):
+            if not isinstance(candidate_id, int) or isinstance(candidate_id, bool):
                 continue
             if candidate_id not in candidate_map or candidate_id in selected_ids:
                 continue
@@ -502,6 +527,9 @@ class MaisakaExpressionSelector:
                     candidate_pool_size=global_config.expression.expression_vector_candidate_pool_size,
                     cluster_pool_size=self._VECTOR_CLUSTER_POOL_SIZE,
                 )
+            except EmbeddingQuotaCooldownError:
+                logger.info(f"嵌入额度等待恢复，本次使用普通表达候选: session_id={session_id}")
+                return self._sample_legacy_expression_candidates(all_candidates)
             except Exception:
                 logger.exception(
                     f"表达方式向量候选构建失败，回退随手候选: session_id={session_id}"
@@ -543,6 +571,12 @@ class MaisakaExpressionSelector:
         selector_prompt = self._build_selector_prompt(
             candidates=candidates,
         )
+        from src.plugin_runtime.policy_bridge import resolve_policy
+        handled, supplied = await resolve_policy("expression", "selection_prompt", {
+            "candidates": candidates, "max_selected": MAX_SELECTED_EXPRESSIONS,
+            "persona": global_config.personality.personality, "style": global_config.personality.reply_style,
+        })
+        if handled: selector_prompt = supplied["prompt"]
         try:
             raw_response = await sub_agent_runner(selector_prompt)
         except Exception as exc:

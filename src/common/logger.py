@@ -8,6 +8,7 @@ from typing import Callable, Iterator, Optional, Set, TextIO
 import asyncio
 import json
 import logging
+import sys
 import threading
 import time
 
@@ -16,6 +17,7 @@ import tomlkit
 
 from .paths import get_instance_root
 from .logger_color_and_mapping import MODULE_ALIASES, RESET_COLOR, CONVERTED_MODULE_COLORS as MODULE_COLORS
+from .console_output import get_console_stream
 
 
 # 创建logs目录
@@ -68,7 +70,7 @@ def get_console_handler():
     """获取控制台handler单例"""
     global _console_handler
     if _console_handler is None:
-        _console_handler = logging.StreamHandler()
+        _console_handler = logging.StreamHandler(get_console_stream(sys.stderr))
         # 设置控制台handler的日志级别
         console_level = LOG_CONFIG.get("console_log_level", LOG_CONFIG.get("log_level", "INFO"))
         _console_handler.setLevel(getattr(logging, console_level.upper(), logging.INFO))

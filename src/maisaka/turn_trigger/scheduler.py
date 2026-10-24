@@ -1,6 +1,10 @@
 """Maisaka 消息触发调度。"""
 
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
+
+import asyncio
+
+from src.chat.message_receive.message import SessionMessage
 
 from src.common.logger import get_logger
 from src.config.config import global_config
@@ -22,20 +26,26 @@ class MessageTurnScheduler:
 
     def __init__(self, runtime: "MaisakaHeartFlowChatting") -> None:
         self._runtime = runtime
+        self._schedule_lock = asyncio.Lock()
         self._dynamic_reply_gate = DynamicReplyTurnGate(runtime)
 
-    def record_reply(self) -> None:
+    async def record_reply(self, target_message: Optional[SessionMessage] = None, *, event_id: str = "") -> None:
         """记录 Planner 实际调用了一次 reply，供动态门控统计回复次数。"""
 
-        self._dynamic_reply_gate.record_reply()
+        await self._dynamic_reply_gate.record_reply(target_message, event_id=event_id)
 
-    def schedule_message_turn(self) -> None:
+    async def schedule_message_turn(self) -> None:
+        async with self._schedule_lock:
+            await self._schedule()
+
+    async def _schedule(self) -> None:
         runtime = self._runtime
         if runtime._agent_state == runtime._STATE_WAIT:
             if runtime._is_reply_frequency_silent():
                 runtime._enter_stop_state()
             elif not global_config.chat.reply_timing.planner_message_steering:
-                if runtime.chat_stream.is_group_session:
+                wake = await runtime._conversation_policy("wake_wait")
+                if not wake.get("wake", not runtime.chat_stream.is_group_session):
                     return
                 logger.info(f"{runtime.log_prefix} 私聊 wait 期间收到新消息，结束等待并进入 Planner")
                 runtime._enter_running_state()
@@ -47,7 +57,7 @@ class MessageTurnScheduler:
         if pending_count <= 0:
             return
 
-        result = self._evaluate(pending_count)
+        result = await self._evaluate(pending_count)
         if result.decision == "delay":
             logger.debug(f"{runtime.log_prefix} 回复调度 待处理={pending_count} {result.detail}")
             runtime._defer_message_turn_check(result.delay_seconds)
@@ -61,7 +71,7 @@ class MessageTurnScheduler:
                 runtime._update_stage_status("等待已打断", "收到新消息，准备继续思考")
             runtime._enqueue_message_turn()
 
-    def _evaluate(self, pending_count: int) -> TurnGateResult:
+    async def _evaluate(self, pending_count: int) -> TurnGateResult:
         """按流水线顺序返回第一个给出结论的判定。"""
 
         runtime = self._runtime
@@ -81,6 +91,12 @@ class MessageTurnScheduler:
         frequency = runtime._get_effective_reply_frequency()
         if runtime._is_reply_frequency_silent():
             return TurnGateResult(decision="trigger", detail=f"调度=静默消费 频率={frequency:.3f}")
+
+        extension_result = await self._dynamic_reply_gate.evaluate_extension(
+            runtime.message_cache[runtime._last_processed_index :], frequency
+        )
+        if extension_result is not None:
+            return extension_result
 
         if runtime._has_forced_turn_trigger():
             # @ 强制触发的回复同样占用动态门控的回复额度

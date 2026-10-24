@@ -165,6 +165,13 @@ class MemoryDualVectorStateService(KernelServiceBase):
             "vectors.index",
             "vectors_metadata.json",
             "vectors_metadata.pkl",
+            # 双池已验证并激活，旧单池事务文件也必须随旧数据一起退役。
+            "vectors_append.json",
+            "vectors_compaction.json",
+            "vectors.bin.compaction.bak",
+            "vectors_ids.bin.compaction.bak",
+            "vectors.bin.compaction.restore.tmp",
+            "vectors_ids.bin.compaction.restore.tmp",
         ):
             try:
                 (root / filename).unlink(missing_ok=True)

@@ -26,6 +26,7 @@ def _get_builtin_hook_spec_registrars() -> List[HookSpecRegistrar]:
     from src.learners.jargon_miner import register_jargon_hook_specs
     from src.maisaka.chat_loop_service import register_maisaka_hook_specs
     from src.services.send_service import register_send_service_hook_specs
+    from src.plugin_runtime.policy_bridge import register_policy_hook_specs
 
     return [
         register_chat_hook_specs,
@@ -34,6 +35,7 @@ def _get_builtin_hook_spec_registrars() -> List[HookSpecRegistrar]:
         register_expression_hook_specs,
         register_send_service_hook_specs,
         register_maisaka_hook_specs,
+        register_policy_hook_specs,
     ]
 
 

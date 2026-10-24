@@ -213,7 +213,7 @@ class ChatServices:
         self.deferred_tool_specs_by_name = {}
         self._update_stage_status = Mock()
         self._wait_for_message_quiet_period = AsyncMock()
-        self._collect_pending_messages = Mock()
+        self._collect_pending_messages = AsyncMock()
         self._clear_forced_turn_state = Mock()
         self._trigger_trimmed_history_learning = AsyncMock()
         self._stop_background_subagents = AsyncMock()

@@ -418,8 +418,13 @@ class SessionMessage(MaiMessage):
             return component.content
         from src.common.utils.utils_voice import get_voice_text
 
-        text = await get_voice_text(component.binary_data)
-        content = "[语音消息，转录失败]" if text is None else f"[语音: {text}]"
+        text = await get_voice_text(component.binary_data, session_id=self.session_id, message_id=self.message_id)
+        if text is None:
+            content = "[语音消息，转录失败]"
+        elif text in {"[听不清]", "[未检测到可辨认发言]"}:
+            content = f"[语音消息，{text.strip('[]')}]"
+        else:
+            content = f"[语音: {text}]"
         component.content = content
         return content
 

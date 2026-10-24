@@ -36,6 +36,7 @@ from src.common.http_client import get_shared_ssl_context
 from src.config.model_configs import APIProvider, ReasoningParseMode, ToolArgumentParseMode
 from src.llm_models.exceptions import (
     EmptyResponseException,
+    ModelResponseTerminatedError,
     InterruptedStreamOutput,
     NetworkConnectionError,
     ReqAbortException,
@@ -1358,7 +1359,12 @@ def _default_normal_response_parser(
     """
     choices = getattr(resp, "choices", None)
     if not choices:
-        raise EmptyResponseException(resp, "响应解析失败，choices 为空或缺失")
+        # CPA 可能丢失 promptFeedback；不把没有候选的响应误判为可重试空正文。
+        raise ModelResponseTerminatedError("empty_choices")
+
+    finish_reason = str(getattr(choices[0], "finish_reason", "") or "").lower()
+    if finish_reason in {"content_filter", "prohibited_content", "safety", "blocked"}:
+        raise ModelResponseTerminatedError(finish_reason)
 
     message_part = choices[0].message
     native_reasoning = _extract_reasoning_content(message_part, reasoning_key)
@@ -2109,8 +2115,41 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
             "request_kwargs": {},
         }
 
+        audio_keys = {"audio_transcription_mode", "transcription_prompt", "audio_language", "audio_temperature", "audio_mime_type"}
+        mode = str(extra_params.get("audio_transcription_mode", "transcriptions"))
+        prompt = str(extra_params.get("transcription_prompt", ""))
+        language = str(extra_params.get("audio_language", "")).strip()
+        temperature = float(extra_params.get("audio_temperature", 0.0))
+        if mode == "chat":
+            # Gemini兼容网关的标准对话路由可正确剥离思考内容，且支持实际采样参数。
+            snapshot_provider_request["endpoint"] = "/chat/completions"
+            snapshot_provider_request["operation"] = "chat.completions.create"
         try:
-            request_overrides = split_openai_request_overrides(extra_params)
+            request_overrides = split_openai_request_overrides(extra_params, reserved_body_keys=audio_keys)
+            if mode == "chat":
+                messages = [{"role": "user", "content": [
+                    {"type": "text", "text": prompt or "Transcribe the audio faithfully in its original language. Output only the transcript."},
+                    {"type": "input_audio", "input_audio": {"data": audio_base64, "format": "wav"}},
+                ]}]
+                snapshot_provider_request["request_kwargs"] = {
+                    "model": model_info.model_identifier, "messages": messages,
+                    "temperature": temperature, "max_tokens": request.max_tokens or 8192,
+                }
+                raw = await self.client.chat.completions.create(
+                    model=model_info.model_identifier, messages=messages, temperature=temperature,
+                    max_tokens=request.max_tokens or 8192, stream=False,
+                    extra_headers=self._build_request_headers(request_overrides.extra_headers),
+                    extra_query=request_overrides.extra_query or None, extra_body=request_overrides.extra_body or None,
+                )
+                text = raw.choices[0].message.content if raw.choices else None
+                if not isinstance(text, str):
+                    raise RespParseException(raw, "音频对话转写缺少正文，不使用思考内容代替转写。")
+                return _build_portable_api_response(
+                    content=text, reasoning_content=None, tool_calls=None,
+                    logical_turn_id=uuid4().hex, raw_data=raw,
+                ), _extract_usage_record(getattr(raw, "usage", None))
+            if mode != "transcriptions":
+                raise ValueError("不支持的ASR请求协议")
             audio_file: FileTypes = ("audio.wav", io.BytesIO(base64.b64decode(audio_base64)))
             snapshot_provider_request["request_kwargs"] = {
                 "audio_base64": audio_base64,
@@ -2119,10 +2158,12 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
                 "extra_query": request_overrides.extra_query or None,
                 "file_name": "audio.wav",
                 "model": model_info.model_identifier,
+                "prompt": prompt or None, "language": language or None, "temperature": temperature,
             }
             raw_response = await self.client.audio.transcriptions.create(
                 model=model_info.model_identifier,
                 file=audio_file,
+                prompt=prompt or omit, language=language or omit, temperature=temperature,
                 extra_headers=self._build_request_headers(request_overrides.extra_headers),
                 extra_query=request_overrides.extra_query or None,
                 extra_body=request_overrides.extra_body or None,
@@ -2135,7 +2176,7 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
                 error=exc,
                 internal_request=serialize_audio_request_snapshot(request),
                 model_info=model_info,
-                operation="audio.transcriptions.create",
+                operation=str(snapshot_provider_request["operation"]),
                 provider_request=snapshot_provider_request,
                 trace_context=request.trace_context,
             )
@@ -2150,7 +2191,7 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
                 error=exc,
                 internal_request=serialize_audio_request_snapshot(request),
                 model_info=model_info,
-                operation="audio.transcriptions.create",
+                operation=str(snapshot_provider_request["operation"]),
                 provider_request=snapshot_provider_request,
                 trace_context=request.trace_context,
             )
@@ -2167,7 +2208,7 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
                 error=exc,
                 internal_request=serialize_audio_request_snapshot(request),
                 model_info=model_info,
-                operation="audio.transcriptions.create",
+                operation=str(snapshot_provider_request["operation"]),
                 provider_request=snapshot_provider_request,
                 trace_context=request.trace_context,
             )
@@ -2184,7 +2225,7 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
                 error=exc,
                 internal_request=serialize_audio_request_snapshot(request),
                 model_info=model_info,
-                operation="audio.transcriptions.create",
+                operation=str(snapshot_provider_request["operation"]),
                 provider_request=snapshot_provider_request,
                 trace_context=request.trace_context,
             )

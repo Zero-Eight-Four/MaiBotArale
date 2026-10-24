@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import asyncio
+
 from src.A_memorix.host_service import a_memorix_host_service
 from src.common.logger import get_logger
 
@@ -236,6 +238,11 @@ class MemoryService:
                     "group_id": str(group_id or "").strip(),
                 },
             )
+            from src.services.conversation_privacy import filter_search
+
+            payload = await asyncio.to_thread(filter_search, payload, chat_id)
+            from src.plugin_runtime.context_views import select_memory
+            payload = await select_memory(payload,chat_id,"search")
             return self._coerce_search_result(payload)
         except Exception as exc:
             logger.warning(f"长期记忆搜索失败: {exc}")
@@ -360,6 +367,11 @@ class MemoryService:
                 "get_person_profile",
                 {"person_id": clean_person_id, "chat_id": chat_id, "limit": max(1, int(limit))},
             )
+            from src.services.conversation_privacy import filter_profile
+
+            payload = await asyncio.to_thread(filter_profile, payload, chat_id)
+            from src.plugin_runtime.context_views import select_memory
+            payload = await select_memory(payload,chat_id,"profile")
             return self._coerce_profile_result(payload)
         except Exception as exc:
             logger.warning(f"获取人物画像失败: {exc}")
@@ -403,6 +415,10 @@ class MemoryService:
                 {"action": str(action or "").strip(), **kwargs},
                 timeout_ms=timeout_ms,
             )
+            if action == "search" and isinstance(payload, dict):
+                from src.services.conversation_privacy import filter_search
+
+                payload = await asyncio.to_thread(filter_search, payload, str(kwargs.get("chat_id") or kwargs.get("session_id") or ""))
             return payload if isinstance(payload, dict) else {"success": False, "error": "invalid_payload"}
         except Exception as exc:
             logger.warning(f"图片记忆调用失败: {exc}")
@@ -429,9 +445,19 @@ class MemoryService:
             logger.warning(f"Episode 管理调用失败: {exc}")
             return {"success": False, "error": str(exc)}
 
-    async def profile_admin(self, *, action: str, **kwargs) -> Dict[str, Any]:
+    async def profile_admin(self, *, action: str, chat_id: str = "", **kwargs) -> Dict[str, Any]:
         try:
-            return await self._invoke_admin("memory_profile_admin", action=action, **kwargs)
+            from src.services.conversation_privacy import group_session
+
+            effective_action = "evidence" if action == "query" and group_session(chat_id) else action
+            payload = await self._invoke_admin("memory_profile_admin", action=effective_action, **kwargs)
+            if action == "query" and chat_id:
+                from src.services.conversation_privacy import filter_profile
+
+                payload = await asyncio.to_thread(filter_profile, payload, chat_id)
+                from src.plugin_runtime.context_views import select_memory
+                payload = await select_memory(payload,chat_id,"profile")
+            return payload
         except Exception as exc:
             logger.warning(f"画像管理调用失败: {exc}")
             return {"success": False, "error": str(exc)}

@@ -63,6 +63,8 @@ SUBAGENT_FORBIDDEN_TOOL_NAMES = frozenset(
         "show_emoji_list",
         "tool_search",
         "wait",
+        "set_reminder",
+        "cancel_reminder",
     }
 )
 
@@ -168,7 +170,7 @@ def get_stop_tool_spec() -> ToolSpec:
 def _is_grantable(tool_spec: ToolSpec) -> bool:
     """判断一个工具能否交给子代理使用。"""
 
-    if not tool_spec.enabled or tool_spec.name in SUBAGENT_FORBIDDEN_TOOL_NAMES:
+    if not tool_spec.enabled or tool_spec.name in SUBAGENT_FORBIDDEN_TOOL_NAMES or tool_spec.name.startswith(("send_", "delete_", "upload_")):
         return False
     # 明确标注为破坏性的工具不交给看不到聊天上下文的子代理
     return not (tool_spec.annotation is not None and tool_spec.annotation.destructive is True)
@@ -198,6 +200,7 @@ async def _run_sub_agent_rounds(
     granted_specs: List[ToolSpec],
     tool_usage: Dict[str, int],
     max_rounds: int,
+    policy_cycle_id: str | None = None,
 ) -> SubAgentOutcome:
     """在独立上下文里多轮运行子代理，直到它给出结论或用完轮数。
 
@@ -226,9 +229,10 @@ async def _run_sub_agent_rounds(
     ]
     execution_context = engine._build_tool_execution_context(task)
     conclusion = ""
+    stop_after_policy_denial = False
 
     for round_index in range(max_rounds + 1):
-        is_final_round = round_index == max_rounds
+        is_final_round = round_index == max_rounds or stop_after_policy_denial
         if is_final_round:
             sub_agent_history.append(
                 ReferenceMessage(
@@ -275,11 +279,13 @@ async def _run_sub_agent_rounds(
                 )
             else:
                 tool_usage[tool_call.func_name] = tool_usage.get(tool_call.func_name, 0) + 1
-                result = await tool_registry.invoke(engine._build_tool_invocation(tool_call, task), execution_context)
+                result = await engine._invoke_tool_with_extension_policy(engine._build_tool_invocation(tool_call, task), execution_context, policy_cycle_id=policy_cycle_id)
                 logger.info(
                     f"{runtime.log_prefix} 子代理调用工具 {tool_call.func_name} "
                     f"参数={json.dumps(tool_call.args or {}, ensure_ascii=False)[:200]} 成功={result.success}"
                 )
+            if result.metadata.get("extension_limited"):
+                stop_after_policy_denial = True
             tool_result_message = _build_tool_result_message(tool_call, result, logical_turn_id)
             sub_agent_history.append(tool_result_message)
             await emit_subagent_tool_result(
@@ -305,6 +311,7 @@ async def _run_and_report(
     granted_specs: List[ToolSpec],
     tool_usage: Dict[str, int],
     max_rounds: int,
+    policy_cycle_id: str | None = None,
 ) -> SubAgentOutcome:
     """运行子代理，并把完成或失败上报给观察页；被终止的任务由终止方上报。"""
 
@@ -318,6 +325,7 @@ async def _run_and_report(
             granted_specs=granted_specs,
             tool_usage=tool_usage,
             max_rounds=max_rounds,
+            policy_cycle_id=policy_cycle_id,
         )
     except asyncio.CancelledError:
         raise
@@ -389,6 +397,7 @@ async def handle_tool(
         f"\n（未授权的工具：{'、'.join(rejected_tool_names)}，它们不存在或只能由你自己调用）" if rejected_tool_names else ""
     )
 
+    dispatch_policy_cycle_id = engine._tool_policy_cycle_id
     task_manager = runtime._subagent_tasks
     run_in_background_mode = global_config.capabilities.advanced_sub_agent
     max_rounds = SUBAGENT_BACKGROUND_MAX_ROUNDS if run_in_background_mode else SUBAGENT_MAX_ROUNDS
@@ -419,6 +428,7 @@ async def handle_tool(
                 granted_specs=granted_specs,
                 tool_usage=background_task.tool_usage,
                 max_rounds=max_rounds,
+                policy_cycle_id=dispatch_policy_cycle_id,
             )
 
         background_task = task_manager.start(
@@ -448,6 +458,7 @@ async def handle_tool(
         granted_specs=granted_specs,
         tool_usage={},
         max_rounds=max_rounds,
+        policy_cycle_id=dispatch_policy_cycle_id,
     )
     usage_text = format_tool_usage(outcome.tool_usage)
     if not outcome.conclusion:

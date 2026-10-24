@@ -124,7 +124,7 @@ def test_actual_replyer_prompts_keep_personality_materials_and_post_format(monke
     assert "原帖作者甲、评论者乙" in text
     assert '"paragraphs"' in text
     assert "你正在群里聊天" not in text
-    assert "长回复" not in text
+    assert "reply_style" not in text
     assert '"paragraphs"' in get_item_text(items[-1])
 
 

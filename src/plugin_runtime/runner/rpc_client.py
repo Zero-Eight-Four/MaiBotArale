@@ -19,6 +19,7 @@ from src.plugin_runtime.protocol.envelope import (
     RequestIdGenerator,
 )
 from src.plugin_runtime.protocol.errors import ErrorCode, RPCError
+from src.plugin_runtime.request_lifecycle import IncomingRequests, notify_cancel
 from src.plugin_runtime.transport.base import Connection
 from src.plugin_runtime.transport.factory import create_transport_client
 
@@ -63,6 +64,7 @@ class RPCClient:
         self._session_token: str = session_token
         self._codec: Codec = codec or MsgPackCodec()
 
+        self._incoming_requests = IncomingRequests()
         self._id_gen = RequestIdGenerator()
         self._connection: Optional[Connection] = None
         self._runner_id: str = str(uuid.uuid4())
@@ -207,7 +209,11 @@ class RPCClient:
         try:
             await connection.send_frame(self._codec.encode_envelope(envelope))
             return await asyncio.wait_for(future, timeout=timeout_ms / 1000.0)
+        except asyncio.CancelledError:
+            await notify_cancel(connection, self._codec, envelope)
+            raise
         except asyncio.TimeoutError:
+            await notify_cancel(connection, self._codec, envelope)
             self._pending_requests.pop(request_id, None)
             raise RPCError(ErrorCode.E_TIMEOUT, f"请求 {method} 超时 ({timeout_ms}ms)") from None
         except Exception as exc:
@@ -215,6 +221,8 @@ class RPCClient:
             if isinstance(exc, RPCError):
                 raise
             raise RPCError(ErrorCode.E_UNKNOWN, str(exc)) from exc
+        finally:
+            self._pending_requests.pop(request_id, None)
 
     async def send_event(
         self,
@@ -266,7 +274,9 @@ class RPCClient:
             if envelope.is_response():
                 self._handle_response(envelope)
             elif envelope.is_request():
-                self._track_background_task(asyncio.create_task(self._handle_request(envelope)))
+                self._track_background_task(self._incoming_requests.start(envelope, self._connection, lambda envelope=envelope: self._handle_request(envelope)))
+            elif envelope.is_broadcast() and envelope.method == "rpc.cancel":
+                self._incoming_requests.cancel(envelope, self._connection)
             elif envelope.is_broadcast():
                 self._track_background_task(asyncio.create_task(self._handle_broadcast(envelope)))
 
@@ -297,23 +307,32 @@ class RPCClient:
 
         handler = self._method_handlers.get(envelope.method)
         if handler is None:
-            error_resp = envelope.make_error_response(
+            response = envelope.make_error_response(
                 ErrorCode.E_METHOD_NOT_ALLOWED.value,
                 f"未注册的方法: {envelope.method}",
             )
-            await connection.send_frame(self._codec.encode_envelope(error_resp))
-            return
+        else:
+            try:
+                response = await self._incoming_requests.invoke(envelope, handler)
+            except TimeoutError:
+                response = envelope.make_error_response(ErrorCode.E_TIMEOUT.value, "RPC operation deadline exceeded")
+            except RPCError as exc:
+                response = envelope.make_error_response(exc.code.value, exc.message, exc.details)
+            except Exception as exc:
+                logger.error(f"处理请求 {envelope.method} 异常: {exc}", exc_info=True)
+                response = envelope.make_error_response(ErrorCode.E_UNKNOWN.value, str(exc))
 
+        # A handler may unload a plugin while the Host is disconnecting. Response
+        # delivery failure is not a handler exception; do not send a second error
+        # response into the same closed connection.
+        if connection.is_closed:
+            logger.debug(f"请求 {envelope.method} 已处理，连接关闭后不再发送响应")
+            return
         try:
-            response = await handler(envelope)
             await connection.send_frame(self._codec.encode_envelope(response))
-        except RPCError as exc:
-            error_resp = envelope.make_error_response(exc.code.value, exc.message, exc.details)
-            await connection.send_frame(self._codec.encode_envelope(error_resp))
-        except Exception as exc:
-            logger.error(f"处理请求 {envelope.method} 异常: {exc}", exc_info=True)
-            error_resp = envelope.make_error_response(ErrorCode.E_UNKNOWN.value, str(exc))
-            await connection.send_frame(self._codec.encode_envelope(error_resp))
+        except ConnectionError as exc:
+            log = logger.debug if not self._running or connection.is_closed else logger.warning
+            log(f"请求 {envelope.method} 的响应连接已断开: {exc}")
 
     async def _handle_broadcast(self, envelope: Envelope) -> None:
         """处理 Host 发来的广播事件。

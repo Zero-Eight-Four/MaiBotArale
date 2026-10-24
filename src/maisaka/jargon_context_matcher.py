@@ -15,6 +15,7 @@ from src.common.data_models.message_component_data_model import TextComponent
 from src.common.database.database import get_db_session
 from src.common.database.database_model import HighFrequencyTerm, Jargon
 from src.common.logger import get_logger
+from src.learners.jargon_matching import contains_jargon
 from src.common.utils.utils_config import JargonConfigUtils
 from src.chat.utils.utils import is_bot_self
 from src.maisaka.context.messages import LLMContextMessage, ReferenceMessage, ReferenceMessageType, SessionBackedMessage
@@ -343,7 +344,7 @@ def _normalize_match_text(text: object) -> str:
 
 
 def _contains_mechanical_match(normalized_text: str, normalized_term: str) -> bool:
-    return normalized_term in normalized_text
+    return contains_jargon(normalized_text, normalized_term)
 
 
 def _calculate_match_score(

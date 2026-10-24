@@ -1803,6 +1803,20 @@ async def test_dual_migration_cleans_legacy_single_pool_files(
     assert not (data_dir / "vectors" / "vectors_metadata.pkl").exists()
     assert (data_dir / "vectors" / "dual_ready.json").exists()
 
+    # 模拟迁移前写入者留下的日志；旧单池数据已退役，不能再让日志阻塞提交。
+    retired_transactions = (
+        "vectors_append.json", "vectors_compaction.json", "vectors.bin.compaction.bak",
+        "vectors_ids.bin.compaction.bak", "vectors.bin.compaction.restore.tmp",
+        "vectors_ids.bin.compaction.restore.tmp",
+    )
+    for filename in retired_transactions:
+        (data_dir / "vectors" / filename).write_text("retired transaction", encoding="utf-8")
+    kernel._clear_legacy_single_vector_files_after_dual_ready()
+    assert all(not (data_dir / "vectors" / filename).exists() for filename in retired_transactions)
+    assert kernel.paragraph_vector_store.has_data()
+    assert kernel.graph_vector_store.has_data()
+    kernel.vector_store.save(embedding_fingerprint=fake_embedding_manager.get_embedding_fingerprint())
+
     await kernel.shutdown()
 
 

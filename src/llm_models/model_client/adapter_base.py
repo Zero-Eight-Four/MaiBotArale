@@ -18,7 +18,6 @@ from .base_client import (
     UsageRecord,
     UsageTuple,
 )
-from .embedding_rate_limit import get_embedding_rate_limit
 
 RawStreamT = TypeVar("RawStreamT")
 """流式原始响应类型变量。"""
@@ -148,22 +147,13 @@ class AdapterClient(BaseClient, ABC, Generic[RawStreamT, RawResponseT]):
         Returns:
             APIResponse: 解析完成的统一嵌入响应。
         """
-        limiter = get_embedding_rate_limit(
-            self.api_provider.name, self.api_provider.base_url, request.model_info.model_identifier,
-        )
         wait_seconds = 0.0
         max_attempts = 1 if request.retry_handled_externally else 3
         for attempt in range(max_attempts):
-            generation, waited = await limiter.wait()
-            wait_seconds += waited
-            if request.trace_context is not None:
-                request.trace_context.rate_limit_wait_seconds += waited
             try:
                 response, usage_record = await self._execute_embedding_request(request)
                 break
             except RespNotOkException as exc:
-                if exc.status_code == 429:
-                    limiter.reduce(generation)
                 if attempt + 1 == max_attempts or exc.status_code not in (408, 429, 500, 502, 503, 504):
                     raise
                 # 直接调用才在客户端重试；经 Orchestrator 的请求由外层负责。

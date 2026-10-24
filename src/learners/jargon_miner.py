@@ -15,6 +15,7 @@ from src.common.database.database import get_db_session
 from src.common.database.database_model import Jargon, JargonCreatedBy, Messages
 from src.common.logger import get_logger
 from src.common.utils.utils_config import JargonConfigUtils
+from src.chat.utils.utils import is_bot_self
 from src.config.config import global_config
 from src.llm_models.payload_content.context_item import ContextItemBuilder, RoleType
 from src.maisaka.display.prompt_cli_renderer import PromptCLIVisualizer
@@ -70,6 +71,8 @@ def register_jargon_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
                     {
                         "session_id": {"type": "string", "description": "当前会话 ID。"},
                         "session_name": {"type": "string", "description": "当前会话展示名称。"},
+                        "sources": {"type":"array", "items":{"type":"object"}, "description":"真实来源消息，不含机器人自身或通知证据。"},
+                        "initial_meanings": {"type":"object", "description":"审核通过的新词初步解释。"},
                         "entries": {
                             "type": "array",
                             "items": {"type": "object"},
@@ -318,7 +321,8 @@ class JargonMiner:
                 context_lines: List[str] = []
                 valid_group: JargonEvidenceMessageGroup = []
                 for ref, message in zip(group, messages, strict=True):
-                    if self._is_emoji_only_message(message):
+                    if (message.is_notify or self._is_emoji_only_message(message)
+                            or is_bot_self(message.platform, message.user_id)):
                         continue
                     message_text = (message.processed_plain_text or "").strip()
                     if message_text:
@@ -507,6 +511,7 @@ class JargonMiner:
 
         # 步骤3: 比较两个推断结果
         prompt3_template = prompt_manager.get_prompt("jargon_compare_inference")
+        prompt3_template.add_context("raw_content_list", raw_content_text)
         prompt3_template.add_context("inference1", json.dumps(inference1, ensure_ascii=False))
         prompt3_template.add_context("inference2", json.dumps(inference2, ensure_ascii=False))
         prompt3 = await prompt_manager.render_prompt(prompt3_template)
@@ -528,8 +533,8 @@ class JargonMiner:
             logger.warning(f"jargon {content} 比较解析失败")
             return
 
-        is_similar = comparison_result.get("is_similar", False)
-        is_jargon = not is_similar  # 如果相似，说明不是黑话；如果有差异，说明是黑话
+        is_jargon = comparison_result.get("is_similar") is False
+        # 比较解释不同不足以确认黑话，须明确判定并引用真实上下文证据。
 
         inferred_meaning = str(inference1.get("meaning", "") or "").strip()
         finalized_meaning = inferred_meaning if is_jargon else previous_meaning
@@ -592,7 +597,8 @@ class JargonMiner:
             logger.info(f"[{self.session_name}]{content} 不是黑话")
 
     async def process_extracted_entries(
-        self, entries: List[JargonEntry], person_name_filter: Optional[Callable[[str], bool]] = None
+        self, entries: List[JargonEntry], person_name_filter: Optional[Callable[[str], bool]] = None,
+        sources: Optional[List[dict]] = None,
     ) -> Tuple[int, int]:
         """
         处理已提取的黑话条目（从 expression_learner 路由过来的）
@@ -631,6 +637,7 @@ class JargonMiner:
             session_id=self.session_id,
             session_name=self.session_name,
             entries=self._serialize_jargon_entries(uniq_entries),
+            sources=sources or [],
         )
         if before_persist_result.aborted:
             logger.info(f"[{self.session_name}] 黑话提取结果被 Hook 中止，不写入数据库")
@@ -643,6 +650,7 @@ class JargonMiner:
                 logger.info(f"[{self.session_name}] Hook 过滤后没有可写入的黑话条目")
                 return 0, 0
 
+        initial_meanings = before_persist_result.kwargs.get("initial_meanings") or {}
         saved = 0
         updated = 0
         for entry in uniq_entries:
@@ -684,11 +692,23 @@ class JargonMiner:
                     self._add_to_cache(content)
                     continue
                 # 已存在记录，更新 count 和证据消息引用
+                existing_groups = self._normalize_evidence_message_groups(
+                    self._load_json_list(matched_jargon.evidence_messages, "evidence_messages")
+                )
+                merged_groups = self._merge_evidence_message_groups(existing_groups, evidence_messages)
+                if not evidence_messages or merged_groups == existing_groups:
+                    # 同一批真实证据不能因缓存重扫/学习重放再次增加计数。
+                    continue
                 self._update_jargon(matched_jargon, evidence_messages)
                 if self._should_infer_meaning(matched_jargon):
                     asyncio.create_task(self._infer_meaning_by_id(matched_jargon.id))  # type: ignore
                 updated += 1
             else:
+                # 新候选没有通过入库前审核并提供初步解释时，不进入人工审核词库。
+                initial_meaning = (initial_meanings or {}).get(content, "").strip()
+                if not initial_meaning:
+                    logger.info(f"跳过未通过入库审核的新黑话：{content}")
+                    continue
                 # 没找到匹配记录，创建新记录
                 session_dict_str = json.dumps({self.session_id: 1})
                 now = datetime.now()
@@ -699,7 +719,7 @@ class JargonMiner:
                     is_global=False,
                     count=1,
                     is_jargon=False,
-                    meaning="",
+                    meaning=initial_meaning,
                     created_by=JargonCreatedBy.AI,
                     created_timestamp=now,
                     updated_timestamp=now,

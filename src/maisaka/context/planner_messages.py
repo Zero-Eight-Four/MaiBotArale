@@ -18,6 +18,8 @@ def build_planner_prefix(
     *,
     timestamp: datetime,
     user_name: str,
+    platform: str = "",
+    user_id: str = "",
     group_card: str = "",
     message_id: Optional[str] = None,
     chat_id: Optional[str] = None,
@@ -31,6 +33,8 @@ def build_planner_prefix(
     Args:
         timestamp: 消息时间。
         user_name: 展示给规划器的用户名。
+        platform: 原始会话消息的平台，不从昵称或正文推断。
+        user_id: 原始会话消息的发送者账号，不从昵称或正文推断。
         group_card: 群昵称。
         message_id: 消息 ID。
         chat_id: 聊天流 ID。
@@ -65,6 +69,11 @@ def build_planner_prefix(
             f'user="{escape(user_name, quote=True)}"',
         ]
     )
+
+    # 身份来自会话元数据；昵称与群名片仅用于展示，不能代替真实账号。
+    for key, value in (("platform", platform), ("user_id", user_id)):
+        if normalized_value := value.strip():
+            message_attrs.append(f'{key}="{escape(normalized_value, quote=True)}"')
 
     normalized_group_card = group_card.strip()
     if normalized_group_card:
@@ -132,6 +141,8 @@ def build_planner_user_prefix_from_session_message(
     return build_planner_prefix(
         timestamp=message.timestamp,
         user_name=user_name,
+        platform=message.platform,
+        user_id=user_info.user_id,
         group_card=user_info.user_cardname or "",
         message_id=message.message_id,
         chat_id=message.session_id,

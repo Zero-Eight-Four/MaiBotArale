@@ -57,7 +57,10 @@ class HeartFCMessageReceiver:
             except Exception as e:
                 logger.error(f"出现错误: {e}")
 
-            await MessageUtils.store_message_to_db_async(message)  # 存储消息到数据库
+            stored = await MessageUtils.store_message_to_db_async(message)  # 存储消息到数据库
+            if not stored:
+                logger.debug(f"跳过自身消息重复回声: session={message.session_id} message_id={message.message_id}")
+                return
             if chat is not None:
                 await chat.register_message(message)
             from src.services.memory_flow_service import memory_automation_service

@@ -34,7 +34,7 @@ async def test_stop_ends_thinking_like_no_tools() -> None:
         _tool_registry=registry,
         _chat_history=[],
         session_id="test-stop",
-        chat_stream=SimpleNamespace(is_group_session=True, group_id="group", user_id="", platform="test"),
+        chat_stream=SimpleNamespace(is_group_session=True, group_id="group", user_id="", platform="test", account_id="bot"),
         is_action_tool_currently_available=lambda name: True,
         expand_message_id_aliases=lambda arguments: arguments,
         _update_stage_status=Mock(),

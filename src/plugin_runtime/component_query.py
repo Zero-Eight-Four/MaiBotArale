@@ -828,6 +828,13 @@ class ComponentQueryService:
         for key, value in context_payload.items():
             if key not in payload or not payload.get(key):
                 payload[key] = value
+        # 保留给插件的可信宿主上下文，不能被模型工具参数覆盖。
+        payload["_host_context"] = {
+            **context_payload,
+            "logical_turn_id": context.metadata.get("logical_turn_id") if context is not None else None,
+            "account_id": context.metadata.get("account_id") if context is not None else None,
+            "is_group_chat": context.is_group_chat if context is not None else None,
+        }
         return payload
 
     @staticmethod
@@ -862,6 +869,13 @@ class ComponentQueryService:
             error_message = ""
             if not success:
                 error_message = str(result.get("error", result.get("message", "插件工具执行失败")) or "").strip()
+            metadata = {"plugin_id": entry.plugin_id}
+            supplied_metadata = result.get("metadata")
+            if isinstance(supplied_metadata, dict):
+                # 保留资料归属，控制流字段仍由宿主处理，避免资料元数据改变轮次行为。
+                for key in ("private_only", "private_owner", "source_chat_ids", "provenance", "audit"):
+                    if key in supplied_metadata:
+                        metadata[key] = supplied_metadata[key]
             return ToolExecutionResult(
                 tool_name=entry.name,
                 success=success,
@@ -869,7 +883,7 @@ class ComponentQueryService:
                 error_message=error_message,
                 structured_content=result,
                 content_items=content_items,
-                metadata={"plugin_id": entry.plugin_id},
+                metadata=metadata,
                 stop_after_execution=stop_after_execution,
             )
 

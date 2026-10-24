@@ -98,7 +98,7 @@ def select(model):
     return DummySelect(model)
 
 
-async def dummy_get_voice_text(binary_data):
+async def dummy_get_voice_text(binary_data, **kwargs):
     return None  # 可以根据需要返回模拟的文本结果
 
 
@@ -397,7 +397,7 @@ async def test_multiple_reply_with_delay_in_forward(monkeypatch):
     msg.platform = "test_platform"
     msg.raw_message = MessageSequence(components=[])
 
-    async def delayed_get_voice_text(binary_data):
+    async def delayed_get_voice_text(binary_data, **kwargs):
         await asyncio.sleep(0.5)  # 模拟延迟
         return "这是语音转文本的结果"
 

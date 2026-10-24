@@ -79,6 +79,8 @@ async def test_queued_proactive_turn_resumes_wait_entered_after_enqueue() -> Non
     runtime._has_pending_messages = lambda: False
     runtime._clear_focus_cooldown_wakeup_scheduled = lambda: None
     runtime.restore_proactive_user_context = AsyncMock()
+    # Local policy is an independent boundary; this fixture bypasses __init__.
+    runtime._conversation_policy = AsyncMock(return_value={})
     runtime._chat_history = []
     engine = object.__new__(MaisakaReasoningEngine)
     engine._runtime = runtime
@@ -91,3 +93,4 @@ async def test_queued_proactive_turn_resumes_wait_entered_after_enqueue() -> Non
     assert runtime._chat_history[0].tool_call_id == "wait-call"
     assert runtime._get_pending_wait_tool_call_ids() == set()
     assert runtime._agent_state == runtime._STATE_RUNNING
+    runtime._conversation_policy.assert_awaited_once_with("proactive")

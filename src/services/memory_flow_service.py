@@ -508,7 +508,9 @@ class ChatSummaryWritebackState:
 
 class ChatSummaryWritebackService:
     def __init__(self) -> None:
-        self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=256)
+        self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
+        self._queued_sessions: set[str] = set()
+        self._pending_messages: dict[str, Any] = {}
         self._worker_task: Optional[asyncio.Task] = None
         self._stopping = False
         self._states: dict[str, ChatSummaryWritebackState] = {}
@@ -538,15 +540,27 @@ class ChatSummaryWritebackService:
             return
         if self._stopping:
             return
+        session_id = self._resolve_session_id(message)
+        if not session_id:
+            return
+        # A trigger is only a cursor into stored history; retain the newest
+        # cursor per chat instead of queuing one model request per sent segment.
+        self._pending_messages[session_id] = message
+        if session_id in self._queued_sessions:
+            return
         try:
-            self._queue.put_nowait(message)
+            self._queue.put_nowait(session_id)
+            self._queued_sessions.add(session_id)
         except asyncio.QueueFull:
+            self._pending_messages.pop(session_id, None)
             logger.warning("聊天摘要写回队列已满，跳过本次触发")
 
     async def _worker_loop(self) -> None:
         try:
             while not self._stopping:
-                message = await self._queue.get()
+                session_id = await self._queue.get()
+                self._queued_sessions.discard(session_id)
+                message = self._pending_messages.pop(session_id)
                 try:
                     await self._handle_message(message)
                 except Exception as exc:
@@ -587,27 +601,43 @@ class ChatSummaryWritebackService:
             configured_context_length=configured_context_length,
             pending_message_count=pending_message_count,
         )
-        result = await memory_service.ingest_summary(
-            external_id=f"chat_auto_summary:{session_id}:{total_message_count}",
-            chat_id=session_id,
-            text="",
-            participants=[],
-            time_end=message_time,
-            metadata={
-                "generate_from_chat": True,
-                "context_length": context_length,
-                "configured_context_length": configured_context_length,
-                "writeback_source": "memory_flow_service",
-                "trigger": "message_threshold",
-                "previous_trigger_message_count": state.last_trigger_message_count,
-                "pending_message_count": pending_message_count,
-                "trigger_message_count": total_message_count,
-                "summary_review_count": 2,
-            },
-            respect_filter=True,
-            user_id=self._extract_session_user_id(message),
-            group_id=self._extract_session_group_id(message),
-        )
+        from src.plugin_runtime.policy_bridge import resolve_policy
+        summary_scope = {"session_id": session_id, "message_count": total_message_count,
+                         "context_length": context_length, "now": time.time()}
+        handled, policy = await resolve_policy("memory", "summary_prepare", summary_scope)
+        if handled and policy.get("allow") is False:
+            logger.debug(f"摘要写回已合并到待处理历史: session_id={session_id} reason={policy.get('reason')}")
+            return
+        timeout = min(300.0, max(1.0, float(policy.get("timeout_seconds", 90)))) if handled else None
+        try:
+            async with asyncio.timeout(timeout):
+                result = await memory_service.ingest_summary(
+                    external_id=f"chat_auto_summary:{session_id}:{total_message_count}",
+                    chat_id=session_id,
+                    text="",
+                    participants=[],
+                    time_end=message_time,
+                    metadata={
+                        "generate_from_chat": True,
+                        "context_length": context_length,
+                        "configured_context_length": configured_context_length,
+                        "writeback_source": "memory_flow_service",
+                        "trigger": "message_threshold",
+                        "previous_trigger_message_count": state.last_trigger_message_count,
+                        "pending_message_count": pending_message_count,
+                        "trigger_message_count": total_message_count,
+                        "summary_review_count": 2,
+                    },
+                    respect_filter=True,
+                    user_id=self._extract_session_user_id(message),
+                    group_id=self._extract_session_group_id(message),
+                )
+
+        except TimeoutError:
+            result = memory_service_module.MemoryWriteResult(success=False, detail="summary_timeout")
+        await resolve_policy("memory", "summary_finished", {
+            **summary_scope, "now": time.time(), "success": bool(result.success), "detail": str(result.detail),
+        })
         if not getattr(result, "success", False):
             logger.warning(
                 f"聊天摘要自动写回失败: session_id={session_id} detail={getattr(result, 'detail', '')}",
@@ -919,6 +949,7 @@ class ImageMemoryWritebackService:
         parts = [component.text.strip() for component in components if isinstance(component, TextComponent)]
         return " ".join(part for part in parts if part)
 
+
     async def _handle_message(self, message: Any, *, component_paths: Optional[List[str]] = None) -> bool:
         raw_message = message.raw_message
         components = raw_message.components
@@ -932,15 +963,23 @@ class ImageMemoryWritebackService:
         timestamp = message.timestamp.timestamp()
         user_statement = self._explicit_user_text(components)
         failures: List[Exception] = []
+        ingested_static_image = False
         for component_path, component in image_components:
             if component_paths is not None and component_path not in component_paths:
                 continue
             try:
                 if not component.binary_data:
                     await component.load_image_binary()
+                image_bytes = bytes(component.binary_data)
+                from src.plugin_runtime.policy_bridge import resolve_binary_policy
+                handled, policy = await resolve_binary_policy("memory", "image_accept", image_bytes,
+                    {"message_id": message_id, "session_id": chat_id})
+                if handled and isinstance(policy, dict) and policy.get("accepted") is False:
+                    logger.debug(f"跳过不支持的多帧图片记忆: message_id={message_id}, component_path={component_path}")
+                    continue
                 result = await memory_service.image_memory(
                     action="ingest",
-                    image_bytes=bytes(component.binary_data),
+                    image_bytes=image_bytes,
                     source_kind="chat",
                     external_ref=build_chat_external_ref(
                         chat_id=chat_id,
@@ -959,6 +998,7 @@ class ImageMemoryWritebackService:
                 if not result.get("success"):
                     raise RuntimeError(str(result.get("error") or "图片记忆写入失败"))
 
+                ingested_static_image = True
                 cached_description = image_manager.get_cached_image_description(component.binary_hash)
                 description = (
                     f"[图片：{cached_description}]" if cached_description else str(component.content or "").strip()
@@ -978,7 +1018,7 @@ class ImageMemoryWritebackService:
         if failures:
             # 处理完所有组件后完整暴露失败，任务保留供重试，已成功组件由外部引用去重。
             raise ExceptionGroup("消息中的图片组件处理失败", failures)
-        return True
+        return ingested_static_image
 
 
 class MemoryAutomationService:

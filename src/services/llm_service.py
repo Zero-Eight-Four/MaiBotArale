@@ -427,7 +427,9 @@ class LLMServiceClient:
         self._record_cache_stats(result, prompt_text=prompt_text, session_id=session_id)
         return result
 
-    async def transcribe_audio(self, voice_base64: str, *, session_id: str = "") -> LLMAudioTranscriptionResult:
+    async def transcribe_audio(
+        self, voice_base64: str, *, session_id: str = "", audio_options: Dict[str, Any] | None = None
+    ) -> LLMAudioTranscriptionResult:
         """执行音频转写请求。
 
         Args:
@@ -439,6 +441,7 @@ class LLMServiceClient:
         return await self._orchestrator.generate_response_for_voice(
             voice_base64,
             session_id=self._resolve_effective_session_id(session_id),
+            audio_options=audio_options,
         )
 
 def get_available_models() -> Dict[str, Any]:

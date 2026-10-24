@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 from typing import Any, Dict, List, Sequence
 
 from src.chat.message_receive.message import SessionMessage
@@ -120,8 +121,12 @@ def deserialize_tool_calls(raw_tool_calls: Any) -> List[ToolCall]:
     return normalized_tool_calls
 
 
+def _image_reference(image_base64: str) -> str:
+    return "sha256:" + sha256(image_base64.encode("ascii")).hexdigest()
+
+
 def serialize_prompt_items(items: Sequence[ContextItem]) -> List[PromptMessage]:
-    """将 Context Items 序列化为 Hook 可传输载荷，不暴露 replay payload。
+    """序列化 Hook 载荷；图片以宿主引用传递，不暴露 replay payload。
 
     Args:
         items: 原始 Context Items。
@@ -130,7 +135,12 @@ def serialize_prompt_items(items: Sequence[ContextItem]) -> List[PromptMessage]:
         List[PromptMessage]: 序列化后的 Item 字典列表。
     """
 
-    return [serialize_context_item_snapshot(item) for item in items]
+    payloads = [serialize_context_item_snapshot(item) for item in items]
+    for payload in payloads:
+        for part in payload.get("parts", []):
+            if part.get("type") == "image":
+                part["image_base64_ref"] = _image_reference(part.pop("image_base64"))
+    return payloads
 
 
 def deserialize_prompt_items(
@@ -169,6 +179,31 @@ def deserialize_prompt_items(
     for raw_item in raw_items:
         if not isinstance(raw_item, dict):
             raise ValueError("Hook 返回的 Item 必须是字典")
+        # 引用只允许解析为该 Item 原本持有的图片，防止串用其他会话的媒体。
+        meta = raw_item.get("meta", {})
+        source_payload = original_payload_by_id.get(meta.get("item_id")) if isinstance(meta, dict) else None
+        images = {
+            _image_reference(part["image_base64"]): part
+            for part in (source_payload or {}).get("parts", [])
+            if part.get("type") == "image"
+        }
+        raw_parts = raw_item.get("parts")
+        if isinstance(raw_parts, list):
+            restored_parts = []
+            for part in raw_parts:
+                if isinstance(part, dict) and "image_base64_ref" in part:
+                    reference = part["image_base64_ref"]
+                    image = images.get(reference) if isinstance(reference, str) else None
+                    if (
+                        image is None or part.get("type") != "image"
+                        or part.get("image_format") != image["image_format"]
+                        or "image_base64" in part
+                    ):
+                        raise ValueError("Hook 返回了未知或不匹配的图片引用")
+                    restored_parts.append(dict(image))
+                else:
+                    restored_parts.append(part)
+            raw_item = {**raw_item, "parts": restored_parts}
         normalized_item = deserialize_context_item_snapshot(raw_item)
         item_id = normalized_item.meta.item_id
         # 先规范化再比较，未知字段和已废弃的 group/ordinal 不应使 replay 失效。

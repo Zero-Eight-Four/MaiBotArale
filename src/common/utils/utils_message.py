@@ -207,8 +207,8 @@ class MessageUtils:
         )
 
     @staticmethod
-    def store_message_to_db(message: "SessionMessage"):
-        """存储消息到数据库，此方法没有update机制。
+    def store_message_to_db(message: "SessionMessage") -> bool:
+        """存储消息到数据库；自身发送记录与平台回声只保留一条。
 
         加锁在同步方法本体，保证所有写入路径（包括同步直接调用与 async wrapper）
         都被串行化，参见 `_DB_WRITE_THREAD_LOCK` 注释。
@@ -217,19 +217,31 @@ class MessageUtils:
 
         with _DB_WRITE_THREAD_LOCK:
             with get_db_session() as session:
+                from src.common.database.database_model import Messages
+
+                user_id = message.message_info.user_info.user_id
+                # 按平台身份去重；正文相同但 ID 不同的消息仍独立保留。
+                if message.account_id and user_id == message.account_id and message.message_id and not message.is_notify:
+                    existing = session.exec(select(Messages).filter_by(
+                        platform=message.platform, account_id=message.account_id,
+                        session_id=message.session_id, user_id=user_id, message_id=message.message_id,
+                    ).limit(1)).first()
+                    if existing is not None:
+                        return False
                 MessageUtils.fill_reply_frequency_if_available(message)
                 MessageUtils._persist_image_components(message.raw_message.components, session)
                 db_message = message.to_db_instance()
                 session.add(db_message)
+        return True
 
     @staticmethod
-    async def store_message_to_db_async(message: "SessionMessage") -> None:
+    async def store_message_to_db_async(message: "SessionMessage") -> bool:
         """异步存储消息到数据库。
 
         把同步 SQLAlchemy session 移出事件循环；锁逻辑在 `store_message_to_db`
         本体里持有，本方法仅做 `to_thread` 透传。
         """
-        await asyncio.to_thread(MessageUtils.store_message_to_db, message)
+        return await asyncio.to_thread(MessageUtils.store_message_to_db, message)
 
     @staticmethod
     def fill_reply_frequency_if_available(message: "SessionMessage") -> None:
@@ -356,21 +368,23 @@ class MessageUtils:
 
         with _DB_WRITE_THREAD_LOCK:
             with get_db_session() as session:
-                existing_target = session.exec(
-                    select(Messages).filter_by(message_id=normalized_new_message_id).limit(1)
-                ).first()
-                if existing_target is not None:
-                    logger.warning(
-                        "消息 ID 回填时发现真实 ID 已存在，已跳过更新: "
-                        f"{normalized_old_message_id} -> {normalized_new_message_id}"
-                    )
-                    return False
-
                 source_messages = session.exec(select(Messages).filter_by(message_id=normalized_old_message_id)).all()
                 if not source_messages:
                     return False
 
                 for source_message in source_messages:
+                    # 回声可能先于临时 ID 回填到达；只合并同账户、同会话的自身记录。
+                    target = session.exec(select(Messages).filter_by(
+                        platform=source_message.platform, account_id=source_message.account_id,
+                        session_id=source_message.session_id, user_id=source_message.user_id,
+                        message_id=normalized_new_message_id,
+                    ).limit(1)).first()
+                    if target is not None:
+                        if source_message.account_id and source_message.user_id == source_message.account_id:
+                            session.delete(target)
+                        else:
+                            logger.warning("消息 ID 回填目标已存在，跳过非自身消息更新")
+                            continue
                     source_message.message_id = normalized_new_message_id
                     session.add(source_message)
 

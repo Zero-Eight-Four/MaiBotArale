@@ -313,7 +313,8 @@ class ToolRegistry:
         routes: Dict[str, Tuple[ToolProvider, ToolSpec]] = {}
         for provider, original in entries:
             name = original.name
-            spec = deepcopy(original)
+            from src.plugin_runtime.tool_specs import extend_tool_spec
+            spec = await extend_tool_spec(deepcopy(original), context)
             spec.metadata["registry_original_name"] = name
             if name in routes:
                 source = str(

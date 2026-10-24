@@ -1,42 +1,30 @@
-from rich.traceback import install
+"""Native ASR entry point; optional quality policies are implemented by SDK plugins."""
+from pathlib import Path
 from typing import Optional
-
+import asyncio
 import base64
+import tempfile
 
-from src.common.logger import get_logger
-from src.config.config import global_config
+from src.config.config import config_manager, global_config
+from src.plugin_runtime.policy_bridge import resolve_policy
 from src.services.llm_service import LLMServiceClient
 
 
-install(extra_lines=3)
-
-logger = get_logger("voice_utils")
-
-asr_model = LLMServiceClient(task_name="voice", request_type="audio")
-
-
-async def get_voice_text(voice_bytes: bytes) -> Optional[str]:
-    """
-    获取音频文件转录文本
-
-    Args:
-        voice_bytes (bytes): 语音消息的字节数据
-    Returns:
-        return (Optional[str]): 转录后的文本描述，如果转录失败或未启用语音识别功能，则返回 None
-    """
-    if not global_config.voice.enable_asr:
-        logger.warning("语音识别未启用，无法处理语音消息")
+async def get_voice_text(voice_bytes: bytes, *, session_id: str = "", message_id: str = "") -> Optional[str]:
+    if not global_config.voice.enable_asr or not voice_bytes:
         return None
-    try:
-        voice_base64 = base64.b64encode(voice_bytes).decode("utf-8")
-        transcription_result = await asr_model.transcribe_audio(voice_base64)
-        text = transcription_result.text
-        if not text:
-            logger.warning("语音转文字结果为空")
-
-        # logger.debug(f"转录结果是是{text}")
-
-        return text
-    except Exception as e:
-        logger.error(f"语音转文字失败: {str(e)}")
-        return None
+    # 以临时资产传递大型音频，不把 Base64 塞入插件 RPC 帧。
+    with tempfile.NamedTemporaryFile(suffix=".audio") as asset:
+        await asyncio.to_thread(asset.write, voice_bytes)
+        asset.flush()
+        signature = str(config_manager.get_model_config().model_task_config.voice.model_list)
+        handled, result = await resolve_policy("asr", "transcribe", {
+            "asset_path": str(Path(asset.name).resolve()), "session_id": session_id,
+            "message_id": message_id, "model_signature": signature,
+        })
+        if handled:
+            return result if isinstance(result, str) else None
+    response = await LLMServiceClient(task_name="voice", request_type="audio").transcribe_audio(
+        base64.b64encode(voice_bytes).decode(), session_id=session_id,
+    )
+    return response.text or None

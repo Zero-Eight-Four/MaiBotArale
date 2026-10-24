@@ -1,6 +1,6 @@
 """插件 WebUI 协议：共享 API 边界，分别定义简单组件页面与隔离 HTML 页面。"""
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
@@ -547,6 +547,7 @@ def load_webui_extension(plugin_dir: str) -> Optional[WebUIExtension]:
             relative = Path(entry)
             if (
                 relative.is_absolute()
+                or PureWindowsPath(entry).anchor
                 or relative.anchor
                 or ".." in relative.parts
                 or relative.suffix.lower() != ".html"

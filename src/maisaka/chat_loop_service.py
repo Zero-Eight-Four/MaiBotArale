@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, List, Optional, Sequence
+from uuid import uuid4
 
 import asyncio
 import time
@@ -198,6 +199,7 @@ def register_maisaka_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
                             "type": "array",
                             "description": "即将发给模型的 Context Item 列表；不包含 replay payload。",
                         },
+                        "locale": {"type": "string", "description": "本次提示词语言，供插件选择对应静态规则。"},
                         "item_schema_version": {
                             "type": "integer",
                             "description": "Context Item Hook 载荷版本。",
@@ -206,6 +208,8 @@ def register_maisaka_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
                             "type": "array",
                             "description": "当前候选工具定义列表。",
                         },
+                        "request_id": {"type": "string", "description": "宿主生成的本次模型请求标识。"},
+                        "request_kind": {"type": "string", "description": "planner 或 emotion 子请求。"},
                         "selected_history_count": {
                             "type": "integer",
                             "description": "当前选中的上下文消息数量。",
@@ -250,6 +254,8 @@ def register_maisaka_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
                             "type": "integer",
                             "description": "Context Item Hook 载荷版本。",
                         },
+                        "request_id": {"type": "string", "description": "宿主生成的本次模型请求标识。"},
+                        "request_kind": {"type": "string", "description": "planner 或 emotion 子请求。"},
                         "selected_history_count": {
                             "type": "integer",
                             "description": "当前选中的上下文消息数量。",
@@ -1251,9 +1257,13 @@ class MaisakaChatLoopService:
             for definition, provider_type in zip(all_tools, tool_provider_types, strict=True)
         }
 
+        request_id = uuid4().hex
         serialized_items = serialize_prompt_items(built_messages)
         before_request_result = await self._get_runtime_manager().invoke_hook(
             "maisaka.planner.before_request",
+            locale=get_locale(),
+            request_id=request_id,
+            request_kind=request_kind,
             items=deepcopy(serialized_items),
             item_schema_version=CONTEXT_ITEM_SCHEMA_VERSION,
             tool_definitions=serialize_tool_definitions(all_tools),
@@ -1343,6 +1353,8 @@ class MaisakaChatLoopService:
         serialized_output_items = serialize_prompt_items(generation_result.output_items)
         after_response_result = await self._get_runtime_manager().invoke_hook(
             "maisaka.planner.after_response",
+            request_id=request_id,
+            request_kind=request_kind,
             output_items=deepcopy(serialized_output_items),
             item_schema_version=CONTEXT_ITEM_SCHEMA_VERSION,
             selected_history_count=len(selected_history),

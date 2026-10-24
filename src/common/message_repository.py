@@ -239,7 +239,17 @@ def find_messages(
                         filtered_results.append(msg)
                 results = filtered_results
 
-            return [_message_to_instance(msg) for msg in results]
+            # 兼容修复前的重复自身回声，读取去重，不清理历史数据。
+            seen_self_ids: set[tuple[str, str, str, str, str]] = set()
+            unique_results = []
+            for msg in results:
+                if msg.account_id and msg.user_id == msg.account_id and msg.message_id and not msg.is_notify:
+                    key = (msg.platform, msg.account_id, msg.session_id, msg.user_id, msg.message_id)
+                    if key in seen_self_ids:
+                        continue
+                    seen_self_ids.add(key)
+                unique_results.append(msg)
+            return [_message_to_instance(msg) for msg in unique_results]
     except Exception as e:
         log_message = (
             "使用 SQLModel 查找消息失败 "

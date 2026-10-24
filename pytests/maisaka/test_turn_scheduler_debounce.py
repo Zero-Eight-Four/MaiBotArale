@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -48,14 +48,16 @@ def _build_scheduler(
     scheduler = MessageTurnScheduler(runtime)
     scheduler._dynamic_reply_gate = Mock()
     scheduler._dynamic_reply_gate.evaluate.return_value = SimpleNamespace(decision="trigger", detail="")
+    scheduler._dynamic_reply_gate.evaluate_extension = AsyncMock(return_value=None)
     return scheduler, runtime
 
 
 @pytest.mark.parametrize("forced", [False, True])
-def test_every_path_waits_for_debounce_before_judging(monkeypatch, forced: bool) -> None:
+@pytest.mark.asyncio
+async def test_every_path_waits_for_debounce_before_judging(monkeypatch, forced: bool) -> None:
     scheduler, runtime = _build_scheduler(monkeypatch, quiet_seconds=1.5, forced=forced)
 
-    scheduler.schedule_message_turn()
+    await scheduler.schedule_message_turn()
 
     runtime._defer_message_turn_check.assert_called_once_with(1.5)
     scheduler._dynamic_reply_gate.evaluate.assert_not_called()
@@ -63,46 +65,50 @@ def test_every_path_waits_for_debounce_before_judging(monkeypatch, forced: bool)
     runtime._enqueue_message_turn.assert_not_called()
 
 
-def test_dynamic_gate_evaluates_after_debounce_deadline(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_dynamic_gate_evaluates_after_debounce_deadline(monkeypatch) -> None:
     scheduler, runtime = _build_scheduler(monkeypatch)
 
-    scheduler.schedule_message_turn()
+    await scheduler.schedule_message_turn()
 
     runtime._defer_message_turn_check.assert_not_called()
     scheduler._dynamic_reply_gate.evaluate.assert_called_once()
     runtime._enqueue_message_turn.assert_called_once()
 
 
-def test_forced_turn_bypasses_idle_backoff(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_forced_turn_bypasses_idle_backoff(monkeypatch) -> None:
     scheduler, runtime = _build_scheduler(monkeypatch, backoff_seconds=30.0, forced=True)
 
-    scheduler.schedule_message_turn()
+    await scheduler.schedule_message_turn()
 
     scheduler._dynamic_reply_gate.record_forced_turn.assert_called_once()
     runtime._defer_message_turn_check.assert_not_called()
     runtime._enqueue_message_turn.assert_called_once()
 
 
-def test_idle_backoff_defers_before_dynamic_gate(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_idle_backoff_defers_before_dynamic_gate(monkeypatch) -> None:
     scheduler, runtime = _build_scheduler(monkeypatch, backoff_seconds=30.0)
 
-    scheduler.schedule_message_turn()
+    await scheduler.schedule_message_turn()
 
     runtime._defer_message_turn_check.assert_called_once_with(30.0)
     scheduler._dynamic_reply_gate.evaluate.assert_not_called()
     runtime._enqueue_message_turn.assert_not_called()
 
 
-def test_steering_wait_resumes_only_after_debounce(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_steering_wait_resumes_only_after_debounce(monkeypatch) -> None:
     scheduler, runtime = _build_scheduler(monkeypatch, quiet_seconds=1.0, agent_state="wait", steering=True)
 
-    scheduler.schedule_message_turn()
+    await scheduler.schedule_message_turn()
 
     runtime._cancel_wait_timeout_task.assert_not_called()
     runtime._defer_message_turn_check.assert_called_once_with(1.0)
 
     runtime._get_message_quiet_period_remaining_seconds = lambda: 0.0
-    scheduler.schedule_message_turn()
+    await scheduler.schedule_message_turn()
 
     runtime._cancel_wait_timeout_task.assert_called_once()
     scheduler._dynamic_reply_gate.evaluate.assert_not_called()
@@ -151,13 +157,14 @@ def test_private_reply_pause_override_does_not_match_another_platform(monkeypatc
     assert ChatConfigUtils.get_talk_value("private-session", is_group_chat=False) == 1.0
 
 
-def test_paused_private_consumes_messages_without_forced_or_dynamic_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_paused_private_consumes_messages_without_forced_or_dynamic_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     scheduler, runtime = _build_scheduler(monkeypatch, backoff_seconds=30.0, forced=True)
     runtime.chat_stream.is_group_session = False
     runtime._is_reply_frequency_silent = lambda: True
     runtime._get_effective_reply_frequency = lambda: 0.0
 
-    scheduler.schedule_message_turn()
+    await scheduler.schedule_message_turn()
 
     runtime._enqueue_message_turn.assert_called_once()
     runtime._defer_message_turn_check.assert_not_called()

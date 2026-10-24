@@ -294,6 +294,19 @@ class SummaryImporter:
         )
         store.save(embedding_fingerprint=embedding_fingerprint)
 
+    def _persist_active_vector_stores(self) -> None:
+        """持久化当前写入的池，双池模式不再提交已退役的单池实例。"""
+        if self._dual_vector_pools_enabled():
+            paragraph_store = self.plugin_config.get("paragraph_vector_store", self.vector_store)
+            stores = [paragraph_store, self._graph_vector_store()]
+        else:
+            stores = [self.vector_store]
+        persisted: set[int] = set()
+        for store in stores:
+            if store is not None and id(store) not in persisted:
+                self._persist_vector_store(store)
+                persisted.add(id(store))
+
     @staticmethod
     def _graph_vector_id(item_type: str, hash_value: str) -> str:
         return f"{str(item_type or '').strip()}:{str(hash_value or '').strip()}"
@@ -744,7 +757,8 @@ class SummaryImporter:
             response = str(result.completion.response or "")
 
             if not success or not response:
-                return SummaryImportResult(False, "LLM 生成总结失败")
+                # Preserve the upstream stop reason for host retry admission.
+                return SummaryImportResult(False, "LLM 生成总结失败: " + str(result.error or "empty_output"))
 
             # 5. 解析结果
             data = self._parse_llm_response(response)
@@ -807,7 +821,7 @@ class SummaryImporter:
             )
 
             # 7. 持久化
-            self._persist_vector_store(self.vector_store)
+            self._persist_active_vector_stores()
             self.graph_store.save()
 
             external_id = str((metadata or {}).get("external_id", "") or "").strip()

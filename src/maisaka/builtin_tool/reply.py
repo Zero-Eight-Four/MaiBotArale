@@ -29,7 +29,14 @@ from src.services import send_service
 from .context import BuiltinToolRuntimeContext, PostProcessedReplyMessage
 
 logger = get_logger("maisaka_builtin_reply")
-_REPLY_TOOL_INTERNAL_ARGUMENTS = {"msg_id", "_reply_id", "_plugin_reply_prompt"}
+_REPLY_TOOL_INTERNAL_ARGUMENTS = {
+    "msg_id",
+    "_reply_id",
+    "_plugin_reply_prompt",
+    "supplement_reason",
+    "expression_intent",
+    "reply_style",
+}
 _DUPLICATE_TARGET_REPLY_REMINDER_ARG = "_duplicate_target_reply_reminder"
 _DUPLICATE_TARGET_REPLY_REMINDER_TEMPLATE = (
     "你刚刚已经回复过这条消息，你刚刚的发言是：“{previous_reply}”\n"
@@ -442,7 +449,6 @@ async def execute_reply(
         return tool_ctx.build_failure_result(
             "reply", "新表情包发送逻辑未开启，请使用 send_emoji 工具。"
         )
-    from src.plugin_runtime.tool_specs import extend_tool_spec
     availability = ToolAvailabilityContext(
         session_id=tool_ctx.runtime.session_id,
         stream_id=tool_ctx.runtime.session_id,
@@ -451,11 +457,10 @@ async def execute_reply(
         group_id=tool_ctx.runtime.chat_stream.group_id,
         user_id=tool_ctx.runtime.chat_stream.user_id,
     )
-    declaration = await extend_tool_spec(get_tool_spec(availability), availability)
     reply_tool_args = {
         key: value
         for key, value in invocation_arguments.items()
-        if key not in _REPLY_TOOL_INTERNAL_ARGUMENTS and key not in declaration.metadata.get("extension_private_parameters",[])
+        if key not in _REPLY_TOOL_INTERNAL_ARGUMENTS
     }
     # 提供给回复 Hook 的可信调用上下文，不进入模型回复参考正文。
     reply_tool_args["_host_context"] = {

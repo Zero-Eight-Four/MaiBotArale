@@ -7,7 +7,7 @@ import pytest
 from src.maisaka.builtin_tool import send_emoji
 import src.plugin_runtime.policy_bridge as bridge
 
-spec=importlib.util.spec_from_file_location('emoji_selection_bridge',Path(__file__).resolve().parents[1] / 'plugins/Arale-emoji-policy/selection.py')
+spec=importlib.util.spec_from_file_location('emoji_selection_bridge',Path(__file__).resolve().parents[1] / 'plugins/Arale-policy/emoji/selection.py')
 policy=importlib.util.module_from_spec(spec);spec.loader.exec_module(policy)
 
 @pytest.mark.asyncio

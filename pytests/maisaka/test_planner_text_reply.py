@@ -313,8 +313,8 @@ def test_prompt_and_tail_reminder_follow_experimental_switch(monkeypatch, locale
         reminder = service._build_planner_final_user_reminder()
     assert ("reply_reference" in prompt) is (not enabled)
     assert ("set_reply_options" in prompt) is enabled
-    assert "stop()" in prompt and "wait()" in prompt
     if enabled:
+        assert "stop()" in prompt and "wait()" in prompt
         assert "stop" in reminder and "wait" in reminder
     else:
         assert "reply" in reminder

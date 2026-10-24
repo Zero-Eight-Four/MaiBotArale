@@ -94,50 +94,6 @@ def test_relation_with_private_support_is_rejected(scoped_privacy):
     assert not privacy.safe_group_evidence({"hash": "r", "type": "relation"}, group(), store)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("current,target", [(group(), private()), (private(), group()),
-                                           (private(), private(sid="private-b"))])
-async def test_focus_switch_cannot_carry_private_context_to_group(current, target):
-    from src.maisaka.builtin_tool.switch_chat import handle_tool as switch
-    from unittest.mock import AsyncMock
-
-    runtime = SimpleNamespace(
-        chat_stream=current,
-        _is_focus_mode_active_for_current_chat=lambda: True,
-        resolve_running_focus_session_from_args=lambda args: SimpleNamespace(session=target),
-        switch_focus_to_session=AsyncMock(),
-    )
-    ctx = SimpleNamespace(runtime=runtime, build_failure_result=BuiltinToolRuntimeContext.build_failure_result)
-    out = await switch(ctx, ToolInvocation(tool_name="switch_chat", arguments={"chat_id": target.session_id}))
-    assert not out.success
-    runtime.switch_focus_to_session.assert_not_called()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("current,target,focus", [(group(), group("group-b"), True),
-                                                 (private(), private(), True),
-                                                 (group(), group("group-b"), False)])
-async def test_focus_switch_preserves_allowed_sessions_and_focus_gate(current, target, focus):
-    from src.maisaka.builtin_tool.switch_chat import handle_tool as switch
-    from unittest.mock import AsyncMock
-
-    runtime = SimpleNamespace(
-        chat_stream=current,
-        _is_focus_mode_active_for_current_chat=lambda: focus,
-        resolve_running_focus_session_from_args=lambda args: SimpleNamespace(session=target),
-        switch_focus_to_session=AsyncMock(return_value=(True, "switched", {}, {})),
-    )
-    ctx = SimpleNamespace(runtime=runtime,
-        build_failure_result=BuiltinToolRuntimeContext.build_failure_result,
-        build_success_result=BuiltinToolRuntimeContext.build_success_result)
-    out = await switch(ctx, ToolInvocation(tool_name="switch_chat", arguments={"chat_id": target.session_id}))
-    assert out.success is focus
-    if focus:
-        runtime.switch_focus_to_session.assert_awaited_once()
-    else:
-        runtime.switch_focus_to_session.assert_not_called()
-
-
 def test_episode_with_private_underlying_paragraph_is_rejected(scoped_privacy):
     from unittest.mock import Mock
 

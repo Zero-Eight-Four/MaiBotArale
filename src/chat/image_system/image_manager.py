@@ -500,10 +500,6 @@ class ImageManager:
     async def _generate_image_description(self, image_bytes: bytes, image_format: str) -> str:
         prompt_template = prompt_manager.get_prompt("image_description")
         prompt = await prompt_manager.render_prompt(prompt_template)
-        from src.plugin_runtime.policy_bridge import resolve_policy
-        handled, policy = await resolve_policy("vision", "description_prompt", {})
-        if handled and isinstance(policy, dict) and isinstance(policy.get("prompt"), str):
-            prompt = policy["prompt"]
         image_base64 = base64.b64encode(image_bytes).decode("utf-8")
 
         generation_result = await vlm.generate_response_for_image(

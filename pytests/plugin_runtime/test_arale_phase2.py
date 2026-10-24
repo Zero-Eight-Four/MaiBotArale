@@ -40,43 +40,55 @@ async def test_capacity_is_native_and_selection_is_checked(policies):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('locale',['zh-CN','en-US','ja-JP'])
-@pytest.mark.parametrize('name',['maisaka_chat','maisaka_chat_focus','maisaka_replyer','learn_style','learn_jargon','jargon_inference_with_context','jargon_compare_inference'])
-async def test_template_ownership(policies,name,locale):
-    handled,result=await policies.resolve('prompt',name,{'locale':locale})
-    assert handled and result['template']
+@pytest.mark.parametrize('name',['maisaka_chat','maisaka_chat_focus','maisaka_replyer'])
+async def test_template_ownership(name,locale):
+    from src.common.prompt_i18n import load_prompt_template
+    project = Path(__file__).resolve().parents[2]
+    loaded = load_prompt_template(name, locale=locale, prompts_root=project/'prompts', custom_prompts_root=project/'data/custom_prompts').template
+    assert loaded and loaded == (project/'data/custom_prompts'/locale/f'{name}.prompt').read_text()
 
 @pytest.mark.asyncio
 async def test_reply_schema_preserves_official_required_reference_and_quote_policy(policies,monkeypatch):
     from src.maisaka.builtin_tool.reply import get_tool_spec
-    from src.plugin_runtime.tool_specs import extend_tool_spec
-    spec=await extend_tool_spec(get_tool_spec())
-    props=spec.parameters_schema['properties']
-    assert spec.parameters_schema['required']==['msg_id','reply_reference']
-    assert 'set_quote' not in props
+    from src.plugin_runtime.hook_payloads import serialize_tool_definitions
+    native=get_tool_spec()
+    p=policies.plugins['Arale-conversation-flow']
+    result=await p.planner_part(
+        session_id='s',
+        items=[{'item_type':'SystemMessageItem','parts':[]}],
+        tool_definitions=serialize_tool_definitions([native.to_llm_definition()]),
+    )
+    schema=result['modified_kwargs']['tool_definitions'][0]['function']['parameters']
+    props=schema['properties']
+    assert schema['required']==['msg_id','reply_reference']
+    assert ('set_quote' in props)==('set_quote' in native.parameters_schema['properties'])
     assert 'supplement_reason' in props
 
 
-def row(user='owner',text='',at=False,correction=False,direct=False):
-    return {'message_id':'m','user_id':user,'platform':'qq','is_self':False,'is_at':at,'is_mentioned':False,
+def row(user='owner',text='',at=False,correction=False,direct=False,mid='m'):
+    return {'message_id':mid,'user_id':user,'platform':'qq','is_self':False,'is_at':at,'is_mentioned':False,
             'traits':{'request_or_correction':correction,'direct_request':direct}}
 
 @pytest.mark.asyncio
 async def test_flow_batch_reply_and_correction(policies):
-    base={'session_id':'s','now':0,'revision':1,'is_group':True,'pending':[],'target':row()}
+    base={'session_id':'s','now':0,'revision':1,'is_group':True,'pending':[],'target':row(mid='t')}
     async def call(action,**kw):return (await policies.resolve('flow',action,{**base,**kw}))[1]
     assert (await call('prepare_reply'))['decision']=='allow'
     await call('sent',parameters={'event_id':'send1'})
     assert (await call('prepare_reply'))['decision']=='skip'
     assert (await call('prepare_reply',parameters={'supplement_reason':'important_correction'}))['decision']=='allow'
     assert (await call('prepare_reply',revision=2))['decision']=='allow'
-    assert (await call('prepare_reply',pending=[row('other')]))['decision']=='skip'
-    result=await call('prepare_reply',pending=[row(correction=True)])
+    assert (await call('prepare_reply',pending=[row('other',mid='o1')]))['decision']=='skip'
+    result=await call('prepare_reply',pending=[row(correction=True,mid='c1')])
     assert result['decision']=='replan' and not result['pause_execution']
-    await call('prepare_reply',pending=[row()])
-    assert (await call('prepare_reply',pending=[row()]))['pause_execution']
+    await call('prepare_reply',pending=[row(mid='c2')])
+    assert (await call('prepare_reply',pending=[row(mid='c3')]))['pause_execution']
 
 @pytest.mark.asyncio
 async def test_flow_quiet_cap_wait_and_reset(policies):
+    p=policies.plugins['Arale-conversation-flow']
+    p.config.plugin.debounce_seconds=3.0
+    p.config.plugin.max_wait_seconds=8.0
     base={'session_id':'s','now':0,'revision':1,'is_group':True,'message':row(),'pending':[],'target':row()}
     async def call(action,**kw):return (await policies.resolve('flow',action,{**base,**kw}))[1]
     await call('received')
@@ -129,21 +141,20 @@ async def test_context_filters_only_real_recall_receipt(policies):
 async def test_jargon_finalize_strict_boolean_and_evidence(policies):
     p=policies.plugins['Arale-jargon-curator']
     evidence='本群把来回改颜色叫木鱼工程'
-    good={'is_similar':False,'has_special_meaning':True,'confidence':'high','evidence_quote':evidence}
+    good={'is_similar':False,'has_special_meaning':True,'confidence':'high','evidence_quote':evidence,'meaning':'反复做无意义修改'}
     for result,expected in [(good,True),({**good,'has_special_meaning':'true'},False),({**good,'evidence_quote':'不存在的证据'},False)]:
-        out=await p.finalize(comparison_result=result,raw_content_list=[evidence],is_jargon=True)
+        out=await p.finalize(content='木鱼工程',comparison_result=result,raw_content_list=[evidence],is_jargon=True)
         assert out['modified_kwargs']['is_jargon'] is expected
 
 @pytest.mark.asyncio
 async def test_rendered_prompt_uses_plugin_template(policies):
     from src.prompt.prompt_manager import prompt_manager
-    prompt_manager.load_prompts()
-    prompt=prompt_manager.get_prompt('learn_jargon');prompt.add_context('chat_history','sample')
-    # 使用模板真实字段填充，而不是猜测字段名。
     from string import Formatter
-    handled,override=await policies.resolve('prompt','learn_jargon',{'locale':'zh-CN'})
-    for _,name,_,_ in Formatter().parse(override['template']):
-        if name and name not in prompt.prompt_render_context:prompt.add_context(name,'sample')
+    prompt_manager.load_prompts()
+    prompt=prompt_manager.get_prompt('learn_jargon')
+    for _,name,_,_ in Formatter().parse(prompt.template):
+        if name and name not in prompt.prompt_render_context:
+            prompt.add_context(name,'sample')
     text=await prompt_manager.render_prompt(prompt)
     assert 'sample' in text
 
@@ -151,14 +162,14 @@ async def test_rendered_prompt_uses_plugin_template(policies):
 @pytest.mark.asyncio
 async def test_planner_template_renders_with_current_official_interface(policies, monkeypatch):
     from src.maisaka.chat_loop_service import MaisakaChatLoopService
-    from src.config.config import global_config
+    from src.common.prompt_i18n import load_prompt
     service = object.__new__(MaisakaChatLoopService)
     service._get_chat_prompt_name = lambda: 'maisaka_chat'
-    service._build_bot_nickname_notice = lambda *args, **kwargs: ''
     service.build_prompt_template_context = lambda **kwargs: {
-        'bot_name': '阿拉蕾', 'bot_alias_notice': '', 'behavior_style': '简短自然', 'bot_nickname_notice': '',
-        'group_chat_attention_block': '', 'query_memory_rule': '', 'subagent_rule': '后台子代理', 'emoji_send_rule': '每轮最多一张'}
-    text = await service._render_extension_planner_prompt([])
-    assert '阿拉蕾的行为风格：简短自然' in text
-    assert 'Planner负责调度' in text
+        'bot_name': '阿拉蕾', 'bot_alias_notice': '', 'personality': '核心人设', 'behavior_style': '简短自然',
+        'bot_nickname_notice': '', 'group_chat_attention_block': '', 'query_memory_rule': '',
+        'subagent_rule': '后台子代理', 'emoji_send_rule': '每轮最多一张', 'tool_call_mode_block': '调用工具'}
+    text = load_prompt(service._get_chat_prompt_name(), **service.build_prompt_template_context())
+    assert '行为风格：简短自然' in text
+    assert '决策职责' in text
     assert '{bot_name}' not in text and '{behavior_style}' not in text

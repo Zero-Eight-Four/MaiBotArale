@@ -23,7 +23,7 @@ async def test_video_rules_round_trip_preserves_host_fields_and_injects_once(tmp
     assert payload['session_id'] == 'opaque'
     items = deserialize_prompt_items(payload['items'], item_schema_version=payload['item_schema_version'],
                                      original_items=original)
-    rules = (Path('plugins/Arale-web-policy/prompts') / locale / 'video_rules.prompt').read_text()
+    rules = (Path('plugins/Arale-policy/web/prompts') / locale / 'video_rules.prompt').read_text()
     assert get_item_text(items[0]).count(rules) == 1
     assert get_item_text(items[1]) == '[B站视频] 测试摘要'
     assert any(c.get('metadata', {}).get('hook') == 'maisaka.replyer.before_model_request'
@@ -48,10 +48,9 @@ async def test_reaction_tool_visibility_duplicate_and_cooldown(tmp_path):
     p._apply_emoji_like = AsyncMock(return_value=(True, ''))
     p._record_and_context = AsyncMock()
     p._resolve_emoji_id = lambda _: (76, False)
-    first = await p.tool_emoji_like(stream_id='s', target_message_id='m', emoji='76')
-    duplicate = await p.tool_emoji_like(stream_id='s', target_message_id='m', emoji='76')
-    next_message = await p.tool_emoji_like(stream_id='s', target_message_id='m2', emoji='76')
+    first = await p.tool_emoji_like(stream_id='s', target_message_id='1001', emoji='76')
+    duplicate = await p.tool_emoji_like(stream_id='s', target_message_id='1001', emoji='76')
+    next_message = await p.tool_emoji_like(stream_id='s', target_message_id='1002', emoji='76')
     assert first['success'] and duplicate['success'] and duplicate['already_reacted']
     assert not next_message['success'] and '频繁' in next_message['error']
-    p._apply_emoji_like.assert_awaited_once_with('s', 'm', 76)
-    p._record_and_context.assert_awaited_once()
+    p._apply_emoji_like.assert_awaited_once_with('s', '1001', 76)

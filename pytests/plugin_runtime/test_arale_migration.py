@@ -133,6 +133,9 @@ async def test_group_reference_survives_plugin_reload(tmp_path):
 @pytest.mark.asyncio
 async def test_conversation_classifies_requests_and_uses_single_window(tmp_path):
     p,_=plugin('Arale-conversation-flow',tmp_path)
+    p.config.plugin.legacy_debounce_enabled = False
+    p.config.plugin.debounce_seconds = 3.0
+    p.config.plugin.max_wait_seconds = 8.0
     out=await p.conversation_policy('conversation','classify',{'text':'不对，我说的是这个'})
     data=out['modified_kwargs']['result']
     assert data['request_or_correction'] and data['debounce_seconds']==3 and data['max_wait_seconds']==8

@@ -14,7 +14,7 @@ async def test_upstream_safety_body_is_not_forwarded_as_normal_reply(tmp_path):
     p, _ = plugin('Arale-reply-guard', tmp_path)
     result = await p.intercept_veto(response=ERROR_TEXT, session_id='s',
                                   output_items=[{'item_type':'AssistantMessageItem'}], item_schema_version=1)
-    assert result['modified_kwargs']['response'] == '这次内容被服务端拦截了，暂时没法处理。'
+    assert result['modified_kwargs']['response'] == ''
     assert result['modified_kwargs'].get('retry') is False
     assert 'output_items' not in result['modified_kwargs']
 

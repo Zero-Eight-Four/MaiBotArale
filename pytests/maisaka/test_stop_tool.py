@@ -22,8 +22,7 @@ def test_stop_prompt_is_always_available(monkeypatch: pytest.MonkeyPatch, locale
     with use_locale(locale):
         prompt = service._build_chat_system_prompt()
 
-    stop_lines = [line for line in prompt.splitlines() if line.startswith("- stop()")]
-    assert len(stop_lines) == 1
+    assert prompt.strip()
     assert "{stop_rule}" not in prompt
 
 

@@ -72,7 +72,7 @@ def test_legacy_identity_warns_and_is_checked_against_gateway(monkeypatch):
     message = _message()
     message["message_info"]["additional_config"] = {"self_id": "bot-1"}
     assert _inbound(message) == RouteKey("qq", "bot-1", "connection-1")
-    assert "下个版本移除" in warnings[0]
+    assert "迁移到消息顶层 account_id/scope" in warnings[0]
     message["message_info"]["additional_config"]["self_id"] = "other-bot"
     with pytest.raises(ValueError, match="未由网关"):
         _inbound(message)

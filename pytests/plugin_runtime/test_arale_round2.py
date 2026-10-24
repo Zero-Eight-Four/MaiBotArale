@@ -47,17 +47,17 @@ async def test_learning_independent_switches_and_reload(tmp_path):
     p, _ = configured('Arale-learning', tmp_path)
     await p.on_load()
     declarations = p.get_components()
-    review = next(c for c in declarations if c['name'] == 'expression__review')
-    result = await getattr(p, review['metadata']['handler_name'])(feature='expression', action='review',
-        payload={'situation': '打招呼', 'style': '早呀', 'review_context': '真实来源', 'persona_context': '简洁'})
-    assert result['modified_kwargs']['result']['suitable'] is True
+    selector = next(c for c in declarations if c['name'] == 'expression__selector_prompt')
+    result = await getattr(p, selector['metadata']['handler_name'])(feature='expression', action='selection_prompt',
+        payload={'candidates': [{'id': 1, 'situation': '打招呼', 'style': '早呀'}], 'max_selected': 2, 'persona': '简洁', 'style': '自然'})
+    assert 'selected_ids' in result['modified_kwargs']['result']['prompt']
     config = p.get_plugin_config_data()
     config['expression']['plugin']['enabled'] = False
     p.set_plugin_config(config)
     await p.on_config_update('self', config, 'test')
     assert not p.modules['expression'].config.enabled
     assert p.modules['jargon'].config.enabled
-    result = await getattr(p, review['metadata']['handler_name'])(feature='expression', action='review', payload={})
+    result = await getattr(p, selector['metadata']['handler_name'])(feature='expression', action='selection_prompt', payload={})
     assert result == {'action': 'continue'}
     await p.on_unload()
     await p.on_load()

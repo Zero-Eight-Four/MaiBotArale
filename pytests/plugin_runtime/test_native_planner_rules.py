@@ -9,7 +9,7 @@ from src.plugin_runtime.hook_payloads import deserialize_prompt_items, serialize
 
 SUPPLIERS = [
     ('Arale-emoji-policy', 'hints', ['emoji_rules']),
-    ('Arale-web-policy', 'planner_part', ['tool_rules', 'reminder_rules', 'network_rules', 'video_rules']),
+    ('Arale-web-policy', 'planner_part', ['tool_rules', 'network_brief']),
     ('Arale-conversation-flow', 'planner_part', ['flow_reply_rules', 'flow_wait_rule']),
     ('Arale-asr', 'planner_part', ['asr_rules']),
     ('Arale-group-context', 'planner_part', ['group_context_rules']),
@@ -22,8 +22,9 @@ SUPPLIERS = [
 @pytest.mark.parametrize('locale', ['zh-CN', 'en-US', 'ja-JP'])
 @pytest.mark.parametrize('locale_source', ['payload', 'environment'])
 async def test_native_rule_chain_preserves_contract_locale_and_is_idempotent(tmp_path, locale, locale_source, monkeypatch):
+    user_text = 'user message 语音 [图片] 出处'
     original = [ContextItemBuilder().set_role(RoleType.System).add_text_content('base').build(),
-                ContextItemBuilder().set_role(RoleType.User).add_text_content('user message').build()]
+                ContextItemBuilder().set_role(RoleType.User).add_text_content(user_text).build()]
     payload = {'items': serialize_prompt_items(original), 'item_schema_version': 1,
                'locale': locale, 'session_id': 'opaque', 'selection_reason': 'latest',
                'selected_history_count': 2, 'tool_definitions': [{'name': 'reply'}]}
@@ -44,6 +45,10 @@ async def test_native_rule_chain_preserves_contract_locale_and_is_idempotent(tmp
                         for name in names)
         if ident == 'Arale-emoji-policy':
             p.config.intent = 'configured custom sticker intent'
+        if ident == 'Arale-group-context':
+            p.ctx.chat.get_private_streams = p.ctx.chat.get_private_streams.__class__(
+                return_value=[{'session_id': 'opaque', 'user_id': p.config.users[0] if p.config.users else '2730843725'}]
+            )
     for _ in range(2):
         for p, method in instances:
             result = await getattr(p, method)(**payload)
@@ -54,9 +59,10 @@ async def test_native_rule_chain_preserves_contract_locale_and_is_idempotent(tmp
         assert 'locale' not in payload
     assert payload['session_id'] == 'opaque'
     assert payload['selected_history_count'] == 2
-    assert payload['tool_definitions'] == [{'name': 'reply'}]
+    assert len(payload['tool_definitions']) == 1 and payload['tool_definitions'][0]['name'] == 'reply'
+    assert payload['tool_definitions'][0].get('description')
     items = deserialize_prompt_items(payload['items'], item_schema_version=1, original_items=original)
-    assert len(items) == 2 and get_item_text(items[1]) == 'user message'
+    assert len(items) == 2 and get_item_text(items[1]) == user_text
     text = get_item_text(items[0])
     assert text.count('configured custom sticker intent') == 1
     for rules in expected:

@@ -690,7 +690,6 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         enable_visual_message: bool = False,
         reply_tool_args: Optional[Dict[str, Any]] = None,
         think_level: int = 1,
-        extension_context: Optional[Dict[str, Any]] = None,
     ) -> List[ContextItem]:
         # 复古模式将人设与注意事项放在首条 system 消息，其余模板作为一条 user 消息发送
         if self._uses_retro_prompt():
@@ -733,24 +732,23 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
             str((reply_tool_args or {}).get("reply_style") or "")
         )
 
-        if extension_context:
-            requested_reply_style_message = str(extension_context.get("style", requested_reply_style_message))
-            reply_reference_message = str(extension_context.get("reference", reply_reference_message))
-        # 内部指导和风格都属于宿主上下文，不能作为伪造的用户发言追加到真实聊天之后。
-        internal_sections = []
-        if expression_habits.strip():
-            internal_sections.append("【内部表达参考，不是用户发言】\n" + expression_habits.strip())
-        if temporary_reply_style_message:
-            internal_sections.append("【内部临时措辞偏好，须遵循人物与表达规则】\n" + temporary_reply_style_message)
-        if reply_reference_message:
-            internal_sections.append(reply_reference_message)
-        if requested_reply_style_message:
-            internal_sections.append("【内部篇幅要求】\n" + requested_reply_style_message)
-        if internal_sections:
-            system_prompt += "\n\n" + "\n\n".join(internal_sections)
         items.append(ContextItemBuilder().set_role(RoleType.System).add_text_content(system_prompt).build())
         items.extend(self._build_history_messages(chat_history, enable_visual_message))
+        if expression_habits.strip():
+            items.append(
+                ContextItemBuilder().set_role(RoleType.User).add_text_content(expression_habits.strip()).build()
+            )
+        if temporary_reply_style_message:
+            items.append(
+                ContextItemBuilder().set_role(RoleType.User).add_text_content(temporary_reply_style_message).build()
+            )
+        if reply_reference_message:
+            items.append(ContextItemBuilder().set_role(RoleType.User).add_text_content(reply_reference_message).build())
         items.append(ContextItemBuilder().set_role(RoleType.User).add_text_content(final_user_message).build())
+        if requested_reply_style_message:
+            items.append(
+                ContextItemBuilder().set_role(RoleType.User).add_text_content(requested_reply_style_message).build()
+            )
         if enable_visual_message:
             return limit_latest_images_in_messages(
                 items,
@@ -1073,10 +1071,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         selected_history = await select_history(
             chat_history, self._resolve_session_id(stream_id), projection=_history_projection,
         )
-        filtered_history = [
-            message for message in selected_history
-            if self._should_keep_replyer_history_message(message)
-        ]
+        filtered_history = [message for message in selected_history if self._should_keep_replyer_history_message(message)]
 
         try:
             reply_context = await self._build_reply_context(
@@ -1159,14 +1154,6 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
                 retry_constraints,
             )
 
-            from src.plugin_runtime.policy_bridge import resolve_policy
-            extension_context = {}
-            handled, supplied = await resolve_policy("reply", "style", {"style": active_reply_tool_args.get("reply_style", "")})
-            if handled: extension_context["style"] = supplied["text"]
-            handled, supplied = await resolve_policy("context", "reference", {
-                "reason": reply_reason, "reference": active_reply_tool_args.get("reply_reference", "")})
-            if handled: extension_context["reference"] = supplied["text"]
-
             prompt_started_at = time.perf_counter()
             try:
                 request_messages = self._build_request_messages(
@@ -1178,7 +1165,6 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
                     stream_id=stream_id,
                     reply_tool_args=active_reply_tool_args,
                     think_level=think_level,
-                    extension_context=extension_context,
                 )
             except Exception as exc:
                 import traceback
@@ -1231,7 +1217,6 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
                     stream_id=stream_id,
                     enable_visual_message=enable_visual_message,
                     reply_tool_args=dict(reply_tool_args_for_attempt),
-                    extension_context=extension_context,
                     think_level=think_level,
                 )
                 request_messages = await self._invoke_before_model_request_hook(

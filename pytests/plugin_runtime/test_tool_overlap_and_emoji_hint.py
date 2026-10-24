@@ -5,19 +5,17 @@ import pytest
 
 from pytests.plugin_runtime.test_arale_migration import plugin
 from src.maisaka.builtin_tool.send_emoji import get_tool_spec
-from src.plugin_runtime.tool_specs import extend_tool_spec
+from src.plugin_runtime.hook_payloads import serialize_tool_definitions
 
 
 @pytest.mark.asyncio
-async def test_emoji_hint_extends_actual_builtin_schema(tmp_path, monkeypatch):
+async def test_emoji_hint_extends_actual_builtin_schema(tmp_path):
     p, _ = plugin('Arale-emoji-policy', tmp_path)
-    async def resolve(feature, action, payload):
-        result = await p.tool_schema(feature, action, payload)
-        return True, result['modified_kwargs']['result']
-    monkeypatch.setattr('src.plugin_runtime.policy_bridge.resolve_policy', resolve)
-    spec = await extend_tool_spec(get_tool_spec())
-    assert spec.parameters_schema['properties']['emotion']['type'] == 'string'
-    assert 'emotion' not in spec.parameters_schema.get('required', [])
+    definitions = serialize_tool_definitions([get_tool_spec().to_llm_definition()])
+    result = await p.hints(items=[{'item_type': 'SystemMessageItem', 'parts': []}], tool_definitions=definitions)
+    tool = result['modified_kwargs']['tool_definitions'][0]['function']
+    assert tool['parameters']['properties']['emotion']['type'] == 'string'
+    assert 'emotion' not in tool['parameters'].get('required', [])
 
 
 @pytest.mark.asyncio

@@ -53,13 +53,17 @@ async def test_invalid_visual_selection_cannot_add_components(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_asset_plugin_uses_sdk_and_rechecks_restored_files(monkeypatch, tmp_path):
-    import importlib.util
+    import importlib
+    import sys
+    import types
     from pathlib import Path
-    path = Path("plugins/Arale-context-policy/assets.py")
-    spec = importlib.util.spec_from_file_location("asset_lookup_test", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    monkeypatch.setattr(module, "__file__", str(tmp_path / "plugins" / "policy" / "assets.py"))
+    pkg_name = "arale_policy_context_asset_test"
+    if pkg_name not in sys.modules:
+        package = types.ModuleType(pkg_name)
+        package.__path__ = [str(Path("plugins/Arale-policy/context").resolve())]
+        sys.modules[pkg_name] = package
+    module = importlib.import_module(pkg_name + ".assets")
+    monkeypatch.setattr(module, "__file__", str(tmp_path / "plugins" / "Arale-policy" / "context" / "assets.py"))
     image = tmp_path / "data" / "emoji.gif"
     image.parent.mkdir()
     query = AsyncMock(return_value={"full_path": "data/emoji.gif", "no_file_flag": False})

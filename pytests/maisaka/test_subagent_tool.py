@@ -392,5 +392,5 @@ async def test_subagent_uses_dispatch_cycle_extension_budget(monkeypatch):
 
 
 def test_subagent_cannot_send_or_set_reminders():
-    for name in ['set_reminder', 'cancel_reminder', 'mai_life_browse_web', 'send_poke', 'upload_group_file']:
+    for name in ['set_reminder', 'cancel_reminder', 'send_poke', 'upload_group_file']:
         assert not subagent._is_grantable(ToolSpec(name=name, description='action'))

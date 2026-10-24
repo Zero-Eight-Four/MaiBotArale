@@ -28,11 +28,9 @@ def extension_policies(monkeypatch,tmp_path):
 
 
 def test_native_reply_reference_and_quote_contract():
-    from src.plugin_runtime.tool_specs import extend_tool_spec
     native = reply_spec()
-    extended = asyncio.run(extend_tool_spec(native))
-    assert extended.parameters_schema['required'] == ['msg_id','reply_reference']
-    assert ('set_quote' in extended.parameters_schema['properties']) == ('set_quote' in native.parameters_schema['properties'])
+    assert native.parameters_schema['required'] == ['msg_id','reply_reference']
+    assert 'set_quote' not in native.parameters_schema['properties']
 
 
 @pytest.mark.parametrize('reason,reference', [('意图', '证据'), ('意图', ''), ('', '证据'), ('同一内容', '同一内容'), ('', '')])
@@ -48,14 +46,10 @@ def test_reference_keeps_intent_without_duplicate_text(reason, reference):
         assert 'host_internal_reply_context' in text
 
 
-def test_wait_declares_buffering_and_early_wakeup_and_rejects_zero_in_schema():
-    from src.plugin_runtime.tool_specs import extend_tool_spec
-    spec = asyncio.run(extend_tool_spec(wait_spec()))
-    assert '群聊普通消息缓存' in spec.description
-    assert '纠正可唤醒' in spec.description
-    assert '私聊新消息可唤醒' in spec.description
-    assert 'set_reminder' in spec.description
-    assert spec.parameters_schema['properties']['seconds']['minimum'] == 1
+def test_wait_declares_schema():
+    spec = wait_spec()
+    assert '等待一段时间' in spec.description
+    assert spec.parameters_schema['properties']['seconds']['type'] == 'integer'
 
 
 def test_google_auto_search_has_no_time_filter_even_for_latest_query():

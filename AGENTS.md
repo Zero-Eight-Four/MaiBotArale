@@ -91,3 +91,17 @@ https://github.com/Mai-with-u/plugin-repo/blob/main/CONTRIBUTING.md
 不用修改changelog.dev，改动应该都写changelog.md
 一般不写入changelog的内容：
 版本号提升或更新项目依赖
+
+## Agent skills
+
+### Issue tracker
+
+Use GitHub Issues in `Zero-Eight-Four/MaiBotArale`. Before issue operations, read `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical triage labels. Before triage, read `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout. Before domain exploration or design, read `docs/agents/domain.md`.

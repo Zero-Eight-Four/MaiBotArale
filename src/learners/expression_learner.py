@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
 
 import asyncio
 import json
+import re
 
 from sqlmodel import select
 
@@ -593,7 +594,12 @@ class ExpressionLearner:
             user_info = message.message_info.user_info
             speaker_name = user_info.user_cardname or user_info.user_nickname or "未知用户"
             speaker_kind = "SELF" if is_bot_self(message.platform, user_info.user_id) else "USER"
-            content = (message.processed_plain_text or "").strip()
+            content = re.sub(
+                r"【合并转发消息:\s*\n.*?\n】",
+                "[forward]",
+                (message.processed_plain_text or "").strip(),
+                flags=re.DOTALL,
+            ).strip()
             if not content:
                 content = "[空消息]"
             learning_messages.append(

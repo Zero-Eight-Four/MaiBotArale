@@ -1360,7 +1360,11 @@ def _default_normal_response_parser(
     choices = getattr(resp, "choices", None)
     if not choices:
         # CPA 可能丢失 promptFeedback；不把没有候选的响应误判为可重试空正文。
-        raise ModelResponseTerminatedError("empty_choices")
+        raise ModelResponseTerminatedError("empty_choices", response_metadata={
+            "response_id": getattr(resp, "id", ""),
+            "response_model": getattr(resp, "model", ""),
+            "prompt_feedback": (getattr(resp, "model_extra", None) or {}).get("promptFeedback", {}),
+        })
 
     finish_reason = str(getattr(choices[0], "finish_reason", "") or "").lower()
     if finish_reason in {"content_filter", "prohibited_content", "safety", "blocked"}:

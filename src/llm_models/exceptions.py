@@ -85,8 +85,9 @@ class RespNotOkException(Exception):
 class ModelResponseTerminatedError(RespNotOkException):
     """上游没有可用候选或明确终止生成；不可重放或切换模型。"""
 
-    def __init__(self, reason: str, status_code: int = 422):
+    def __init__(self, reason: str, status_code: int = 422, response_metadata: Dict[str, Any] | None = None):
         self.reason = reason
+        self.response_metadata = response_metadata or {}
         message = "地区不支持，本次模型任务已取消" if reason.startswith("unsupported_location") else f"上游未提供可用输出（{reason}）"
         super().__init__(status_code, message)
 

@@ -66,7 +66,7 @@ from src.llm_models.payload_content.tool_option import (
     ToolOption,
     normalize_tool_options,
 )
-from src.llm_models.utils import compress_messages, llm_usage_recorder
+from src.llm_models.utils import compress_messages, llm_usage_recorder, strip_images_from_messages
 from src.services.model_task_usage_service import track_model_task_usage
 
 install(extra_lines=3)
@@ -1074,6 +1074,7 @@ class LLMOrchestrator:
             raise ModelResponseTerminatedError("unsupported_location_cooldown", status_code=400)
         original_response_request = request if isinstance(request, ResponseRequest) else None
         active_request: ClientRequest = request
+        empty_choices_attempt = 0
         if isinstance(active_request, EmbeddingRequest):
             active_request.retry_handled_externally = True
 
@@ -1208,8 +1209,72 @@ class LLMOrchestrator:
                 await asyncio.to_thread(update_failed_request_attempt, e, status="retrying", retry_interval=api_provider.retry_interval)
                 await asyncio.sleep(api_provider.retry_interval)
 
-            except ModelResponseTerminatedError:
-                # 明确终止/无候选不属于临时网络故障，交回调用方处理。
+            except ModelResponseTerminatedError as e:
+                # Only an explicit plugin decision may replay unknown zero-candidate
+                # responses. Other terminal failures never enter retry or fallback.
+                if e.reason == "empty_choices":
+                    await ensure_attempt_snapshot(e)
+                    empty_choices_attempt += 1
+                    from src.llm_models.payload_content.context_protocol import ContextProtocolMode
+                    from src.plugin_runtime.hook_payloads import deserialize_prompt_items, serialize_prompt_items
+                    serialized_context = (
+                        serialize_prompt_items(active_request.context_items)
+                        if isinstance(active_request, ResponseRequest) and active_request.context_items
+                        else []
+                    )
+                    handled, decision = await resolve_policy("model", "empty_choices", {
+                        "task": self.request_type, "model_name": model_info.name,
+                        "endpoint": sanitize_diagnostic_url(api_provider.base_url),
+                        "attempt": empty_choices_attempt,
+                        "context_items": serialized_context,
+                        **e.response_metadata,
+                    })
+                    if isinstance(decision, dict):
+                        updated_context: List[ContextItem] | None = None
+                        if isinstance(active_request, ResponseRequest) and active_request.context_items:
+                            raw_items = decision.get("context_items")
+                            if isinstance(raw_items, list) and raw_items:
+                                try:
+                                    updated_context = list(deserialize_prompt_items(
+                                        raw_items,
+                                        mode=ContextProtocolMode.REQUEST_CONTEXT,
+                                        original_items=active_request.context_items,
+                                    ))
+                                except Exception as deserialize_exc:
+                                    logger.warning("策略返回的 context_items 无效，回退为去图处理: %s", deserialize_exc)
+                            if updated_context is None and decision.get("strip_images") is True:
+                                updated_context = strip_images_from_messages(active_request.context_items)
+                            if updated_context is not None:
+                                active_request = active_request.copy_with(context_items=updated_context)
+                                if active_request.trace_context is not None:
+                                    setattr(active_request.trace_context, "sanitized_context_items", updated_context)
+                        if (handled and decision.get("retry") is True
+                                and empty_choices_attempt < 3):
+                            delay = max(0.0, min(30.0, float(decision.get("retry_after", 3))))
+                            logger.warning("任务 '%s' 空候选，插件安排同模型重试；等待%s秒，第%s次重试",
+                                           self.request_type, delay, empty_choices_attempt)
+                            self._schedule_llm_retry_event(
+                                model_name=model_info.name, attempt=empty_choices_attempt + 1,
+                                max_attempts=empty_choices_attempt + 1,
+                                reason="模型返回空候选", retry_interval=delay,
+                            )
+                            await asyncio.to_thread(update_failed_request_attempt, e, status="retrying", retry_interval=delay)
+                            flag = active_request.interrupt_flag if isinstance(active_request, ResponseRequest) else None
+                            if flag is not None:
+                                try:
+                                    await asyncio.wait_for(flag.wait(), timeout=delay)
+                                except asyncio.TimeoutError:
+                                    pass
+                                if flag.is_set():
+                                    raise ReqAbortException("空候选重试等待期间收到打断") from e
+                            else:
+                                await asyncio.sleep(delay)
+                            continue
+                        if handled and decision.get("switch_model") is True:
+                            raise ModelAttemptFailed(
+                                f"模型 '{model_info.name}' 返回空候选，按策略切换候选模型",
+                                original_exception=e,
+                            ) from e
                 raise
 
             except EmbeddingQuotaCooldownError:
@@ -1434,19 +1499,23 @@ class LLMOrchestrator:
             trace_context.model_attempt = 0
             context_items: List[ContextItem] = []
             try:
-                if context_factory:
-                    parameter_count = len(inspect.signature(context_factory).parameters)
-                    if parameter_count >= 2:
-                        context_result = context_factory(client, model_info)
-                    else:
-                        context_result = context_factory(client)
-                    if inspect.isawaitable(context_result):
-                        context_items = await context_result
-                    else:
-                        context_items = context_result
-                if request_type == RequestType.RESPONSE and context_items:
-                    # 图片解码、缩放及切图在线程池执行，避免阻塞 Bot 或 WebUI 事件循环。
-                    context_items = await asyncio.to_thread(normalize_context_images, context_items)
+                sanitized_override = getattr(trace_context, "sanitized_context_items", None)
+                if request_type == RequestType.RESPONSE and isinstance(sanitized_override, list) and sanitized_override:
+                    context_items = list(sanitized_override)
+                else:
+                    if context_factory:
+                        parameter_count = len(inspect.signature(context_factory).parameters)
+                        if parameter_count >= 2:
+                            context_result = context_factory(client, model_info)
+                        else:
+                            context_result = context_factory(client)
+                        if inspect.isawaitable(context_result):
+                            context_items = await context_result
+                        else:
+                            context_items = context_result
+                    if request_type == RequestType.RESPONSE and context_items:
+                        # 图片解码、缩放及切图在线程池执行，避免阻塞 Bot 或 WebUI 事件循环。
+                        context_items = await asyncio.to_thread(normalize_context_images, context_items)
                 request = self._build_client_request(
                     request_type=request_type,
                     model_info=model_info,

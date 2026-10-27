@@ -13,6 +13,7 @@ from src.llm_models.payload_content.context_item import (
     AssistantMessageItem,
     ContextImagePart,
     ContextItem,
+    ContextTextPart,
     SystemMessageItem,
     UserMessageItem,
 )
@@ -161,6 +162,30 @@ def compress_messages(items: list[ContextItem], img_target_size: int = 1 * 1024 
         return replace(item, parts=compressed_parts)
 
     return [rebuild_item_with_compressed_images(item) for item in items]
+
+
+def strip_images_from_messages(
+    items: list[ContextItem],
+    placeholder: str = "[图片已发送]",
+) -> list[ContextItem]:
+    """在插件策略要求去图重试时，仅将当前请求副本中的图片片段替换为文本说明。"""
+    rebuilt: list[ContextItem] = []
+    for item in items:
+        if not isinstance(item, (SystemMessageItem, UserMessageItem, AssistantMessageItem)):
+            rebuilt.append(item)
+            continue
+        if not any(isinstance(part, ContextImagePart) for part in item.parts):
+            rebuilt.append(item)
+            continue
+        stripped_parts = tuple(
+            ContextTextPart(placeholder) if isinstance(part, ContextImagePart) else part
+            for part in item.parts
+        )
+        if isinstance(item, AssistantMessageItem):
+            rebuilt.append(replace(item, parts=stripped_parts, replay=None))
+        else:
+            rebuilt.append(replace(item, parts=stripped_parts))
+    return rebuilt
 
 
 # 供应商在响应中上报过 Prompt 缓存用量的模型，按 (api_provider, model_identifier) 记住。

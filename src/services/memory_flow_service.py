@@ -906,33 +906,68 @@ class ImageMemoryWritebackService:
         if not claimed.get("success"):
             return
         lease_token = str(claimed.get("lease_token") or "")
+        from src.plugin_runtime.policy_bridge import resolve_policy
+        context_length = int(global_config.a_memorix.integration.chat_summary_writeback_context_length)
         for item in claimed.get("items") or []:
             occurrence_id = str(item.get("occurrence_id") or "")
             description_hash = str(item.get("description_hash") or "")
-            try:
-                result = await memory_service.ingest_summary(
-                    external_id=(f"image_description_compensation:{occurrence_id}:{description_hash}"),
-                    chat_id=str(item["chat_id"]),
-                    text="",
-                    participants=[],
-                    time_end=float(item["occurred_at"]) + 0.001,
-                    metadata={
-                        "generate_from_chat": True,
-                        "context_length": int(
-                            global_config.a_memorix.integration.chat_summary_writeback_context_length
-                        ),
-                        "writeback_source": "image_description_compensation",
-                        "trigger": "image_description_ready",
-                        "image_message_id": str(item["message_id"]),
-                        "summary_review_count": 2,
-                    },
-                    respect_filter=True,
+            chat_id = str(item["chat_id"])
+            occurred_at = float(item["occurred_at"])
+            total_count = ChatSummaryWritebackService._count_messages_until_trigger(
+                session_id=chat_id,
+                message_time=occurred_at,
+            )
+            summary_scope = {
+                "session_id": chat_id,
+                "message_count": total_count,
+                "context_length": context_length,
+                "now": time.time(),
+            }
+            handled, policy = await resolve_policy("memory", "summary_prepare", summary_scope)
+            if handled and policy.get("allow") is False:
+                reason = str(policy.get("reason") or "summary_backoff")
+                terminal = reason == "provider_terminated_window"
+                await memory_service.image_memory(
+                    action="complete_description_compensation",
+                    occurrence_id=occurrence_id,
+                    description_hash=description_hash,
+                    lease_token=lease_token,
+                    success=False,
+                    error="provider_terminated: " + reason if terminal else reason,
                 )
+                continue
+            timeout = min(300.0, max(1.0, float(policy.get("timeout_seconds", 90)))) if handled else None
+            try:
+                async with asyncio.timeout(timeout):
+                    result = await memory_service.ingest_summary(
+                        external_id=(f"image_description_compensation:{occurrence_id}:{description_hash}"),
+                        chat_id=chat_id,
+                        text="",
+                        participants=[],
+                        time_end=occurred_at + 0.001,
+                        metadata={
+                            "generate_from_chat": True,
+                            "context_length": context_length,
+                            "writeback_source": "image_description_compensation",
+                            "trigger": "image_description_ready",
+                            "image_message_id": str(item["message_id"]),
+                            "summary_review_count": 2,
+                        },
+                        respect_filter=True,
+                    )
                 success = result.success
                 error = "" if success else result.detail
+            except TimeoutError:
+                success = False
+                error = "summary_timeout"
             except Exception as exc:
                 success = False
                 error = str(exc)
+            await resolve_policy(
+                "memory",
+                "summary_finished",
+                {**summary_scope, "now": time.time(), "success": bool(success), "detail": str(error)},
+            )
             await memory_service.image_memory(
                 action="complete_description_compensation",
                 occurrence_id=occurrence_id,

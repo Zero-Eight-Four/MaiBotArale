@@ -54,11 +54,24 @@ def test_reply_target_uses_actual_sender_and_keeps_quote(monkeypatch):
     monkeypatch.setattr(generator_module, "is_bot_self", lambda platform, user_id: False)
     generator = object.__new__(BaseMaisakaReplyGenerator)
     generator._build_target_message_content = lambda message: "请按要求调整"
-    block = generator._build_target_message_block(_message("other-user", "2730843725"))
+    quoted = SimpleNamespace(
+        platform="qq", timestamp=datetime(2026, 10, 9, 17, 46, 0),
+        message_id="12345678", session_id="session-test", is_notify=False,
+        message_info=SimpleNamespace(user_info=SimpleNamespace(
+            user_id="939008641", user_nickname="Haru Haru", user_cardname="Angelic")),
+        raw_message=MessageSequence([TextComponent("刚输了一把")]),
+    )
+    quoted_entry = SimpleNamespace(message_id="12345678", original_message=quoted)
+    monkeypatch.setattr(
+        BaseMaisakaReplyGenerator, "_find_message_by_id",
+        staticmethod(lambda history, reply_msg, mid: quoted if mid == "12345678" else None),
+    )
+    block = generator._build_target_message_block(_message("other-user", "2730843725"), [quoted_entry])
     assert "platform=qq，user_id=other-user" in block
+    assert "依然范特西（昵称：2730843725）" in block
     assert "1531667542" in block and "12345678" in block and "请按要求调整" in block
+    assert "被引用消息（msg_id=12345678，发送者：Angelic（昵称：Haru Haru））：" in block
     assert generator._build_target_message_block(None) == ""
-
 
 def test_reply_target_keeps_bot_self_semantics(monkeypatch):
     monkeypatch.setattr(generator_module, "is_bot_self", lambda platform, user_id: True)

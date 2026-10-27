@@ -582,6 +582,13 @@ class MetadataImageMixin:
         success: bool,
         error: str = "",
     ) -> bool:
+        terminal_codes = ("empty_choices", "prohibited_content", "content_filter", "provider_terminated")
+        error_text = str(error or "")[:1000]
+        next_status = (
+            "done"
+            if success
+            else ("aborted" if any(code in error_text.lower() for code in terminal_codes) else "failed")
+        )
         with self.transaction(immediate=True) as database:
             cursor = database.execute(
                 """
@@ -590,8 +597,8 @@ class MetadataImageMixin:
                 WHERE occurrence_id=? AND description_hash=? AND lease_token=? AND status='running'
                 """,
                 (
-                    "done" if success else "failed",
-                    str(error or "")[:1000],
+                    next_status,
+                    error_text,
                     _now(),
                     occurrence_id,
                     description_hash,

@@ -165,15 +165,62 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         normalized_body = body.strip()
         return self._normalize_content(normalized_body) if normalized_body else ""
 
-    def _build_target_message_block(self, reply_message: Optional[SessionMessage]) -> str:
+    @staticmethod
+    def _format_sender_display_name(user_info: Any) -> str:
+        cardname = str(getattr(user_info, "user_cardname", "") or "").strip()
+        nickname = str(getattr(user_info, "user_nickname", "") or "").strip()
+        user_id = str(getattr(user_info, "user_id", "") or "").strip()
+        if cardname and nickname and cardname != nickname:
+            return f"{cardname}（昵称：{nickname}）"
+        return cardname or nickname or user_id
+
+    def _resolve_quoted_message_details(
+        self,
+        reply_message: SessionMessage,
+        chat_history: Optional[List[LLMContextMessage]] = None,
+    ) -> List[str]:
+        details: List[str] = []
+        seen_ids: set[str] = set()
+        for component in reply_message.raw_message.components:
+            if not isinstance(component, ReplyComponent):
+                continue
+            raw_quote_id = str(component.target_message_id or "").strip()
+            if not raw_quote_id or raw_quote_id in seen_ids:
+                continue
+            seen_ids.add(raw_quote_id)
+            display_qid = to_display_message_id(raw_quote_id)
+            quoted_msg = self._find_message_by_id(chat_history or [], None, raw_quote_id)
+            if quoted_msg is not None:
+                q_user = quoted_msg.message_info.user_info
+                q_sender = self._format_sender_display_name(q_user)
+                if is_bot_self(quoted_msg.platform, q_user.user_id):
+                    q_sender = f"{global_config.bot.nickname.strip() or q_sender}（你自己）"
+                q_text = self._normalize_content(self._build_target_message_content(quoted_msg), limit=160)
+            else:
+                q_sender = (
+                    str(getattr(component, "target_message_sender_cardname", "") or "").strip()
+                    or str(getattr(component, "target_message_sender_nickname", "") or "").strip()
+                    or str(getattr(component, "target_message_sender_id", "") or "").strip()
+                )
+                q_text = self._normalize_content(str(getattr(component, "target_message_content", "") or ""), limit=160)
+            if q_sender and q_text:
+                details.append(f"- 被引用消息（msg_id={display_qid}，发送者：{q_sender}）：{q_text}")
+            elif q_text:
+                details.append(f"- 被引用消息（msg_id={display_qid}）：{q_text}")
+        return details
+
+    def _build_target_message_block(
+        self,
+        reply_message: Optional[SessionMessage],
+        chat_history: Optional[List[LLMContextMessage]] = None,
+    ) -> str:
         if reply_message is None:
             return ""
 
         user_info = reply_message.message_info.user_info
-        sender_name = user_info.user_cardname or user_info.user_nickname or user_info.user_id
+        sender_name = self._format_sender_display_name(user_info)
         bot_name = global_config.bot.nickname.strip() or sender_name
         target_message_id = to_display_message_id(reply_message.message_id) if reply_message.message_id else "未知"
-        # target_time = reply_message.timestamp.strftime("%Y-%m-%d %H:%M:%S")
         quote_ids = extract_quote_ids_from_message_sequence(reply_message.raw_message)
         target_content = self._normalize_content(self._build_target_message_content(reply_message), limit=300)
         if not target_content:
@@ -188,36 +235,19 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
                 ]
             )
 
-        # target_lines = [
-        #     "【本次回复目标】",
-        #     f"- msg_id：{target_message_id}",
-        # ]
-        # if quote_ids:
-        #     target_lines.append(f"- quote={','.join(quote_ids)}")
-        # target_lines.extend(
-        #     [
-        #         f"- 时间：{target_time}",
-        #         f"- 用户名：{sender_name}",
-        #         f"- 发言内容：{target_content}",
-        #         "",
-        #         "你这次要回复的就是这条目标消息，请结合整段上下文理解，但不要把其他历史消息当成当前回复对象。",
-        #     ]
-        # )
-        # return "\n".join(target_lines)
-
         target_lines = [
             f"你想要回复的消息是 {sender_name} 发送的 msg_id为 {target_message_id} 的消息，你这次要回复的就是这条目标消息，不要把其他历史消息当成当前回复对象。",
             f"- 发送者身份（会话元数据）：platform={reply_message.platform}，user_id={user_info.user_id}",
         ]
         if quote_ids:
             target_lines.append(f"- quote={','.join(to_display_message_id(quote_id) for quote_id in quote_ids)}")
+            target_lines.extend(self._resolve_quoted_message_details(reply_message, chat_history))
         target_lines.extend(
             [
                 f"- 发言内容：{target_content}",
             ]
         )
         return "\n".join(target_lines)
-
     @staticmethod
     def _render_target_at_component(component: AtComponent) -> str:
         target_name = component.target_user_cardname or component.target_user_nickname or component.target_user_id
@@ -592,7 +622,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
     ) -> str:
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         sections: List[str] = [f"当前时间：{current_time}"]
-        target_message_block = self._build_target_message_block(reply_message)
+        target_message_block = self._build_target_message_block(reply_message, chat_history)
         if target_message_block:
             sections.append(target_message_block)
         duplicate_target_reply_reminder = str(
@@ -862,6 +892,8 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
             return ""
 
         normalized_response = " ".join((rejected_response or "").split()).replace('"', '\\"')
+        if not normalized_response:
+            return f"{normalized_reason}，请重新生成回复。"
         return f'由于{normalized_reason}，之前生成的回复"{normalized_response}"不符合要求，你需要重新生成回复。'
 
     @staticmethod
@@ -989,6 +1021,33 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
 
         return not cls._is_replyer_filtered_history_message(message)
 
+    @classmethod
+    def _window_replyer_history(
+        cls,
+        filtered_history: List[LLMContextMessage],
+        reply_message: Optional[SessionMessage],
+    ) -> List[LLMContextMessage]:
+        """Bound Replyer history to recent context while pinning target and quoted messages."""
+        try:
+            base_limit = max(24, int(global_config.chat.max_context_size or 36))
+        except Exception:
+            base_limit = 36
+        if len(filtered_history) <= base_limit:
+            return filtered_history
+        pinned_ids: set[str] = set()
+        if reply_message is not None:
+            if getattr(reply_message, "message_id", None):
+                pinned_ids.add(str(reply_message.message_id).strip())
+            for qid in extract_quote_ids_from_message_sequence(reply_message.raw_message):
+                if qid:
+                    pinned_ids.add(str(qid).strip())
+        tail_start = len(filtered_history) - base_limit
+        kept: List[LLMContextMessage] = []
+        for idx, msg in enumerate(filtered_history):
+            msg_id = str(getattr(msg, "message_id", "") or "").strip()
+            if idx >= tail_start or (msg_id and msg_id in pinned_ids):
+                kept.append(msg)
+        return kept
     def _persist_reply_preview(
         self, result: ReplyGenerationResult, *, stream_id: Optional[str], reply_reason: str
     ) -> None:
@@ -1071,7 +1130,10 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         selected_history = await select_history(
             chat_history, self._resolve_session_id(stream_id), projection=_history_projection,
         )
-        filtered_history = [message for message in selected_history if self._should_keep_replyer_history_message(message)]
+        filtered_history = self._window_replyer_history(
+            [message for message in selected_history if self._should_keep_replyer_history_message(message)],
+            reply_message,
+        )
 
         try:
             reply_context = await self._build_reply_context(
@@ -1203,9 +1265,10 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
                     and image_recognition_refresher is not None
                 ):
                     await image_recognition_refresher(selected_history)
-                    filtered_history[:] = [
-                        message for message in selected_history if self._should_keep_replyer_history_message(message)
-                    ]
+                    filtered_history[:] = self._window_replyer_history(
+                        [message for message in selected_history if self._should_keep_replyer_history_message(message)],
+                        reply_message,
+                    )
                 # 视觉请求构建会解码、缩放和编码图片，在工作线程中执行，避免阻塞聊天事件循环。
                 built_request_messages = await asyncio.to_thread(
                     self._build_request_messages,
@@ -1290,14 +1353,29 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
                 )
                 all_generation_attempts.extend(generation_result.generation_attempts)
             except Exception as exc:
-                logger.exception("Maisaka 回复器调用失败")
-                result.error_message = str(exc)
-                result.metrics = GenerationMetrics(
-                    prompt_ms=prompt_ms,
-                    llm_ms=round((time.perf_counter() - llm_started_at) * 1000, 2),
-                    overall_ms=round((time.perf_counter() - overall_started_at) * 1000, 2),
-                )
-                return finalize(False)
+                from src.llm_models.exceptions import ModelResponseTerminatedError
+                if isinstance(exc, ModelResponseTerminatedError) and exc.reason == "empty_choices":
+                    from src.common.data_models.llm_service_data_models import LLMResponseResult
+                    logger.warning("Maisaka 回复器遇到终态空候选，转入 after_response 恢复: session=%s", preview_chat_id)
+                    generation_result = LLMResponseResult(
+                        response="",
+                        reasoning="",
+                        model_name=active_model_name or "",
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        total_tokens=0,
+                        output_items=(),
+                    )
+                    active_reply_tool_args = {**active_reply_tool_args, "arale_generation_failure": "provider_safety"}
+                else:
+                    logger.exception("Maisaka 回复器调用失败")
+                    result.error_message = str(exc)
+                    result.metrics = GenerationMetrics(
+                        prompt_ms=prompt_ms,
+                        llm_ms=round((time.perf_counter() - llm_started_at) * 1000, 2),
+                        overall_ms=round((time.perf_counter() - overall_started_at) * 1000, 2),
+                    )
+                    return finalize(False)
 
             result.completion.request_prompt = prompt_preview
             result.request_message_count = len(request_messages)
@@ -1329,6 +1407,8 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
                     total_tokens=generation_result.total_tokens,
                 )
                 after_response_kwargs = after_response_result.kwargs
+                if isinstance(after_response_kwargs.get("reply_tool_args"), dict):
+                    active_reply_tool_args = dict(after_response_kwargs["reply_tool_args"])
             except Exception as exc:
                 logger.warning(f"Maisaka 回复器 after_response Hook 调用失败，将继续使用当前回复: {exc}")
                 after_response_kwargs = {}

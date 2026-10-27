@@ -255,7 +255,7 @@ def parse_expression_response(response: str) -> Tuple[List[Tuple[str, str, str]]
         situation = str(item.get("situation", "")).strip()
         style = normalize_expression_style_for_learning(str(item.get("style", "")).strip())
         # 模型输入和输出使用短字段 id，内部元组及插件 Hook 仍沿用来源编号的既有约定。
-        source_id = str(item.get("id", "")).strip()
+        source_id = str(item.get("id") or item.get("source_id") or "").strip()
 
         if situation and style and source_id:
             expressions.append((situation, style, source_id))

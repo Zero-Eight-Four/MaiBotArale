@@ -706,7 +706,12 @@ class SummaryImporter:
                 return SummaryImportResult(False, "未找到有效的聊天记录进行总结")
 
             # 转换为可读文本
-            chat_history_text = message_api.build_readable_messages(messages)
+            chat_history_text = re.sub(
+                r"【合并转发消息:\s*\n.*?\n】",
+                "[合并转发消息]",
+                message_api.build_readable_messages(messages),
+                flags=re.DOTALL,
+            )
             image_evidence_catalog, allowed_image_evidence = self._image_evidence_catalog(
                 messages,
                 stream_id=stream_id,

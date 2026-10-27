@@ -769,6 +769,11 @@ async def execute_reply(
         )
 
     if not sent:
+        sanitized_results = [
+            {**row, "segment": row["segment"] if row.get("success") else ""}
+            for row in send_results
+        ]
+        confirmed_segments = [row["segment"] for row in send_results if row.get("success")]
         return tool_ctx.build_failure_result(
             "reply",
             "可见回复生成成功，但发送失败。",
@@ -776,8 +781,8 @@ async def execute_reply(
                 "msg_id": target_message_id,
                 "set_quote": set_quote,
                 "effective_set_quote": effective_set_quote,
-                "reply_segments": reply_segments,
-                "send_results": send_results,
+                "reply_segments": confirmed_segments,
+                "send_results": sanitized_results,
             },
             metadata=reply_metadata,
         )

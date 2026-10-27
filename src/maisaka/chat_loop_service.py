@@ -1318,15 +1318,37 @@ class MaisakaChatLoopService:
 
         llm_chat = self._get_llm_chat_client(request_kind)
         llm_started_at = time.perf_counter()
-        generation_result = await llm_chat.generate_response_with_context(
-            context_factory=context_factory,
-            options=LLMGenerationOptions(
-                tool_options=all_tools if all_tools else None,
-                response_format=response_format,
-                interrupt_flag=self._interrupt_flag,
-                force_stream_mode=request_kind == "planner" and global_config.chat.reply_timing.planner_message_steering,
-            ),
-        )
+        terminal_failure_extra: dict[str, Any] = {}
+        try:
+            generation_result = await llm_chat.generate_response_with_context(
+                context_factory=context_factory,
+                options=LLMGenerationOptions(
+                    tool_options=all_tools if all_tools else None,
+                    response_format=response_format,
+                    interrupt_flag=self._interrupt_flag,
+                    force_stream_mode=request_kind == "planner" and global_config.chat.reply_timing.planner_message_steering,
+                ),
+            )
+        except Exception as exc:
+            from src.llm_models.exceptions import ModelResponseTerminatedError
+            if request_kind == "planner" and isinstance(exc, ModelResponseTerminatedError) and exc.reason == "empty_choices":
+                from src.common.data_models.llm_service_data_models import LLMResponseResult
+                logger.warning("LLMOrchestrator[maisaka.planner] 终态空候选，转入 after_response 安全恢复: session=%s", self._session_id)
+                generation_result = LLMResponseResult(
+                    response="",
+                    reasoning="",
+                    model_name="",
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                    output_items=(),
+                )
+                terminal_failure_extra = {
+                    "arale_generation_failure": "provider_safety",
+                    "arale_safety_meta": {"logical_turn_id": logical_turn_id or uuid4().hex},
+                }
+            else:
+                raise
         if request_kind == "planner":
             self.planner_request_snapshot = (
                 PlannerRequestSnapshot(generation_result.request_snapshot, tuple(selected_history))
@@ -1364,6 +1386,7 @@ class MaisakaChatLoopService:
             prompt_tokens=generation_result.prompt_tokens,
             completion_tokens=generation_result.completion_tokens,
             total_tokens=generation_result.total_tokens,
+            **terminal_failure_extra,
         )
         after_response_kwargs = after_response_result.kwargs
         final_output_items = generation_result.output_items

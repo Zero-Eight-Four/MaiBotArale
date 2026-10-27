@@ -58,7 +58,7 @@ def poke_plugin():
     name = "regression_smart_poke"
     if name not in sys.modules:
         package = types.ModuleType(name)
-        package.__path__ = [str(Path("plugins/TAIY2020_smart_poke_plugin").resolve())]
+        package.__path__ = [str(Path("plugins/arale-poke").resolve())]
         sys.modules[name] = package
     return importlib.import_module(name + ".plugin").SmartPokePlugin()
 

@@ -729,6 +729,7 @@ async def execute_reply(
         reply_metadata["quote_probability"] = quote_probability
     sent_message_ids: list[str] = []
     send_results: list[dict[str, Any]] = []
+    extension_receipt: dict[str, Any] | None = None
     # 逐段更新回执，后续发送抛错时也保留已经送达的消息，避免误判为完全未发送。
     reply_metadata["sent_message_ids"] = sent_message_ids
     reply_metadata["send_results"] = send_results
@@ -787,8 +788,6 @@ async def execute_reply(
                         )
                     )
                     break
-                # Commit the flow receipt after the first confirmed send too.
-                await tool_ctx.runtime._conversation_policy("sent",target=response_target_message,parameters={"event_id":call_id,"prepared_revision":draft_revision})
                 sent_message_id = sent_message.message_id.strip()
                 if sent_message_id:
                     sent_message_ids.append(sent_message_id)
@@ -801,6 +800,13 @@ async def execute_reply(
                         message_id=sent_message_id,
                     )
                 )
+                # Persist the first confirmed delivery before any later segment can fail/cancel.
+                # Reuse the receipt; a split reply is still one logical delivery event.
+                if extension_receipt is None:
+                    extension_receipt = await tool_ctx.runtime._conversation_policy(
+                        "sent", target=response_target_message,
+                        parameters={"event_id": call_id, "prepared_revision": draft_revision},
+                    )
                 previous_sent_message = sent_message
     except Exception:
         logger.exception(f"{tool_ctx.runtime.log_prefix} 发送文字消息时发生异常，目标消息编号={target_message_id}")
@@ -842,7 +848,12 @@ async def execute_reply(
     if tool_ctx.runtime.chat_stream.platform == CLI_PLATFORM_NAME:
         tool_ctx.append_guided_reply_to_chat_history(combined_reply_text)
     await tool_ctx.runtime.record_planner_reply(response_target_message, event_id=call_id)
-    extension_receipt = await tool_ctx.runtime._conversation_policy("sent",target=response_target_message,parameters={"event_id":call_id,"prepared_revision":draft_revision})
+    if extension_receipt is None:
+        # CLI renders locally and reaches its confirmation point here.
+        extension_receipt = await tool_ctx.runtime._conversation_policy(
+            "sent", target=response_target_message,
+            parameters={"event_id": call_id, "prepared_revision": draft_revision},
+        )
     return tool_ctx.build_success_result(
         "reply",
         reply_receipt + "\n" + str(extension_receipt.get("receipt_hint", "")),

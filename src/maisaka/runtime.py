@@ -176,7 +176,6 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._context_revision = 0
         self._input_version = 0
         self._extension_sequence = 0
-        self._message_debounce_seconds = 1.0
         self._fixed_message_debouncer = MessageDebouncer()
         self._message_debounce_was_enabled = False
         self._last_message_received_at = 0.0
@@ -1043,7 +1042,6 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             "session_id": self.session_id, "text": message.processed_plain_text or "",
         })
         if handled and isinstance(policy, dict):
-            self._message_debounce_seconds = max(0.0, min(30.0, float(policy.get("debounce_seconds", 1))))
             message.extension_traits = {k: policy.get(k) is True for k in ("direct_request", "request_or_correction")}
         handled, policy = await resolve_policy("chat", "classify", {
             "platform": message.platform, "user_id": str(message.message_info.user_info.user_id),

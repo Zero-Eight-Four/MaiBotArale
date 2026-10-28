@@ -1351,15 +1351,7 @@ class MaisakaChatLoopService:
             if request_kind == "planner" and isinstance(exc, ModelResponseTerminatedError) and exc.reason == "empty_choices":
                 from src.common.data_models.llm_service_data_models import LLMResponseResult
                 logger.warning("LLMOrchestrator[maisaka.planner] 终态空候选，转入 after_response 安全恢复: session=%s", self._session_id)
-                generation_result = LLMResponseResult(
-                    response="",
-                    reasoning="",
-                    model_name="",
-                    prompt_tokens=0,
-                    completion_tokens=0,
-                    total_tokens=0,
-                    output_items=(),
-                )
+                generation_result = LLMResponseResult()
                 terminal_failure_extra = {
                     "arale_generation_failure": "provider_safety",
                     "arale_safety_meta": {"logical_turn_id": logical_turn_id or uuid4().hex},

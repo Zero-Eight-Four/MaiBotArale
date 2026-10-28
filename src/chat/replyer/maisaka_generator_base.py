@@ -1361,15 +1361,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
                 if isinstance(exc, ModelResponseTerminatedError) and exc.reason == "empty_choices":
                     from src.common.data_models.llm_service_data_models import LLMResponseResult
                     logger.warning("Maisaka 回复器遇到终态空候选，转入 after_response 恢复: session=%s", preview_chat_id)
-                    generation_result = LLMResponseResult(
-                        response="",
-                        reasoning="",
-                        model_name=active_model_name or "",
-                        prompt_tokens=0,
-                        completion_tokens=0,
-                        total_tokens=0,
-                        output_items=(),
-                    )
+                    generation_result = LLMResponseResult(model_name=active_model_name or "")
                     active_reply_tool_args = {**active_reply_tool_args, "arale_generation_failure": "provider_safety"}
                 else:
                     logger.exception("Maisaka 回复器调用失败")

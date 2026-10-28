@@ -17,6 +17,8 @@ from src.llm_models.utils_model import LLMOrchestrator
 from src.plugin_runtime import policy_bridge
 
 path = Path(__file__).resolve().parents[1] / "plugins/arale-policy/runtime/plugin.py"
+if not path.is_file():
+    pytest.skip("Arale-policy integration requires the separately installed plugin", allow_module_level=True)
 spec = spec_from_file_location("actual_retry_policy", path)
 policy_module = module_from_spec(spec)
 sys.modules[spec.name] = policy_module

@@ -1665,7 +1665,8 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         if self._focus_group is not None:
             return
         self._message_schedule_again = True
-        if self._message_schedule_task is not None and not self._message_schedule_task.done():return
+        if self._message_schedule_task is not None and not self._message_schedule_task.done():
+            return
         async def schedule():
             try:
                 while self._message_schedule_again and self._running:
@@ -1719,20 +1720,13 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
 
     async def _conversation_policy(self, action: str, *, message=None, target=None, parameters=None) -> dict:
         """向扩展提供只读会话快照；只在宿主执行调度和发送。"""
-        from src.plugin_runtime.policy_bridge import resolve_policy
-        def record(m):
-            user=str(m.message_info.user_info.user_id)
-            return {"message_id":str(m.message_id),"platform":m.platform,"user_id":user,
-                "is_self":is_bot_self(m.platform,user),"is_at":m.is_at,"is_mentioned":m.is_mentioned,
-                "traits":getattr(m,"extension_traits",{})}
+        from src.plugin_runtime.context_views import conversation_payload
+        from src.plugin_runtime.policy_bridge import resolve_mapping_policy
+
         self._extension_sequence += 1
-        handled,result=await resolve_policy("flow",action,{"session_id":self.session_id,"now":time.time(),
-            "revision":self._context_revision,"input_version":self._input_version,"event_sequence":self._extension_sequence,
-            "is_group":self.chat_stream.is_group_session,"last_received_at":self._last_message_received_at,
-            "message":record(message) if message else None,"target":record(target) if target else None,
-            "pending":[record(m) for m in self.message_cache[self._last_processed_index:]],"parameters":parameters or {}})
-        if handled and not isinstance(result,dict):raise ValueError("Invalid conversation extension result")
-        return result if handled else {}
+        payload = conversation_payload(self, message=message, target=target, parameters=parameters)
+        result = await resolve_mapping_policy("flow", action, payload)
+        return result if result is not None else {}
 
     def _get_message_debounce_mode(self) -> Literal["off", "fast", "natural", "steady"]:
         """按真实聊天流类型读取档位，使群聊和私聊的配置及热重载互不影响。"""

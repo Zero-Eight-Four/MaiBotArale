@@ -123,6 +123,12 @@ def filter_search(payload: dict, chat_id: str) -> dict:
     }
 
 
+def profile_view_fields(evidence: list[dict[str, Any]], *, limit: int = 220) -> dict[str, Any]:
+    """Render only the evidence already admitted by the caller's provenance boundary."""
+    text = "\n".join(str(item.get("content") or item.get("text") or "")[:limit] for item in evidence)
+    return {"profile_text": text, "summary": text, "traits": [line for line in text.splitlines() if line]}
+
+
 def filter_profile(payload: dict, chat_id: str) -> dict:
     session = group_session(chat_id)
     if session is None:
@@ -131,13 +137,10 @@ def filter_profile(payload: dict, chat_id: str) -> dict:
     evidence = payload.get("evidence") or payload.get("vector_evidence") or []
     evidence = [e for e in evidence if isinstance(e, dict) and safe_group_evidence(e, session, store)]
     # Never reuse the global synthesized profile, even if a subset of evidence is safe.
-    text = "\n".join(str(e.get("content") or e.get("text") or "")[:220] for e in evidence)
     return {
         "success": bool(payload.get("success", True)),
         "person_id": payload.get("person_id", ""),
-        "profile_text": text,
-        "summary": text,
-        "traits": [line for line in text.splitlines() if line],
+        **profile_view_fields(evidence),
         "evidence": evidence,
         "uncertain_candidates": [],
         "profile_source": "current_group_evidence",

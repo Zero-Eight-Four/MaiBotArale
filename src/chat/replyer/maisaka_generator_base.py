@@ -1021,33 +1021,6 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
 
         return not cls._is_replyer_filtered_history_message(message)
 
-    @classmethod
-    def _window_replyer_history(
-        cls,
-        filtered_history: List[LLMContextMessage],
-        reply_message: Optional[SessionMessage],
-    ) -> List[LLMContextMessage]:
-        """Bound Replyer history to recent context while pinning target and quoted messages."""
-        try:
-            base_limit = max(24, int(global_config.chat.max_context_size or 36))
-        except Exception:
-            base_limit = 36
-        if len(filtered_history) <= base_limit:
-            return filtered_history
-        pinned_ids: set[str] = set()
-        if reply_message is not None:
-            if getattr(reply_message, "message_id", None):
-                pinned_ids.add(str(reply_message.message_id).strip())
-            for qid in extract_quote_ids_from_message_sequence(reply_message.raw_message):
-                if qid:
-                    pinned_ids.add(str(qid).strip())
-        tail_start = len(filtered_history) - base_limit
-        kept: List[LLMContextMessage] = []
-        for idx, msg in enumerate(filtered_history):
-            msg_id = str(getattr(msg, "message_id", "") or "").strip()
-            if idx >= tail_start or (msg_id and msg_id in pinned_ids):
-                kept.append(msg)
-        return kept
     def _persist_reply_preview(
         self, result: ReplyGenerationResult, *, stream_id: Optional[str], reply_reason: str
     ) -> None:
@@ -1126,13 +1099,13 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         #     f"历史条数={len(chat_history)} 目标ID={reply_message.message_id if reply_message else None}"
         # )
 
-        from src.plugin_runtime.context_views import select_history
+        from src.plugin_runtime.context_views import select_history, window_reply_history
         selected_history = await select_history(
             chat_history, self._resolve_session_id(stream_id), projection=_history_projection,
         )
-        filtered_history = self._window_replyer_history(
+        filtered_history = window_reply_history(
             [message for message in selected_history if self._should_keep_replyer_history_message(message)],
-            reply_message,
+            target=reply_message, limit=max(24, global_config.chat.max_context_size or 36),
         )
 
         try:

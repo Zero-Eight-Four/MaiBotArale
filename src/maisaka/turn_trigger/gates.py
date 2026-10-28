@@ -49,33 +49,48 @@ class DynamicReplyTurnGate:
         self._round_message_ids: Set[str] = set()
         """当前虚拟轮次内已到达的外部消息 ID。"""
 
-    async def record_reply(self, target_message=None, *, event_id="") -> None:
-        from src.plugin_runtime.policy_bridge import resolve_policy
-        stream=self._runtime.chat_stream
-        handled, policy=await resolve_policy("chat","reply_account",{
-            "session_id":self._runtime.session_id,"now":time.time(),"event_id":event_id,
-            "platform":stream.platform,"user_id":str(target_message.message_info.user_info.user_id) if target_message else "",
-            "group_id":stream.group_id,"is_group":stream.is_group_session})
-        if not handled or policy.get("include_feedback") is True:self._gate.record_reply(time.time())
+    async def record_reply(self, target_message: Optional[SessionMessage] = None, *, event_id: str = "") -> None:
+        from src.plugin_runtime.policy_bridge import resolve_mapping_policy
 
-    async def evaluate_extension(self, pending_messages, frequency):
-        from src.plugin_runtime.policy_bridge import resolve_policy
-        external=self._filter_external_messages(pending_messages)
-        now=time.time()
-        probability=estimate_reply_probability(self._build_likelihood_input(external,now,pending_messages=external)) if external else 0
-        handled,policy=await resolve_policy("chat","admission",{
-            "session_id":self._runtime.session_id,"now":now,"frequency":frequency,"probability":probability,
-            "messages":[{"id":m.message_id,"new":m.message_id not in self._gate._counted_message_ids,
-                "policy":getattr(m,"extension_chat_policy",{})} for m in external]})
-        if not handled or policy.get("decision")=="normal":return None
-        decision=policy.get("decision")
-        if decision not in {"trigger","wait","delay"}:raise ValueError("Invalid extension admission")
-        available={m.message_id for m in external}
-        consume=policy.get("consume_ids",[])
-        if any(i not in available for i in consume):raise ValueError("Extension supplied foreign message ID")
+        stream = self._runtime.chat_stream
+        policy = await resolve_mapping_policy("chat", "reply_account", {
+            "session_id": self._runtime.session_id, "now": time.time(), "event_id": event_id,
+            "platform": stream.platform,
+            "user_id": str(target_message.message_info.user_info.user_id) if target_message else "",
+            "group_id": stream.group_id, "is_group": stream.is_group_session,
+        })
+        if policy is None or policy.get("include_feedback") is True:
+            self._gate.record_reply(time.time())
+
+    async def evaluate_extension(self, pending_messages: Sequence[SessionMessage], frequency: float) -> Optional[TurnGateResult]:
+        from src.plugin_runtime.policy_bridge import resolve_mapping_policy
+
+        external = self._filter_external_messages(pending_messages)
+        now = time.time()
+        probability = estimate_reply_probability(
+            self._build_likelihood_input(external, now, pending_messages=external)
+        ) if external else 0
+        policy = await resolve_mapping_policy("chat", "admission", {
+            "session_id": self._runtime.session_id, "now": now,
+            "frequency": frequency, "probability": probability,
+            "messages": [{"id": message.message_id,
+                          "new": message.message_id not in self._gate._counted_message_ids,
+                          "policy": getattr(message, "extension_chat_policy", {})} for message in external],
+        })
+        if policy is None or policy.get("decision") == "normal":
+            return None
+        decision = policy.get("decision")
+        if decision not in {"trigger", "wait", "delay"}:
+            raise ValueError("Invalid extension admission")
+        available = {message.message_id for message in external}
+        consume = policy.get("consume_ids", [])
+        if any(message_id not in available for message_id in consume):
+            raise ValueError("Extension supplied foreign message ID")
         self._gate.take_uncounted_message_ids(consume)
-        if decision=="trigger":self._gate.close_round()
-        return TurnGateResult(decision=decision,detail=str(policy.get("detail","")),delay_seconds=policy.get("delay_seconds"))
+        if decision == "trigger":
+            self._gate.close_round()
+        return TurnGateResult(decision=decision, detail=str(policy.get("detail", "")),
+                              delay_seconds=policy.get("delay_seconds"))
 
     def record_forced_turn(self, pending_messages: Sequence[SessionMessage]) -> None:
         """@ 强制触发时，把这批消息计入预计回复数；同一批消息只计一次。"""

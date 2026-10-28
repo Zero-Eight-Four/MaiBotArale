@@ -462,15 +462,6 @@ async def execute_reply(
         for key, value in invocation_arguments.items()
         if key not in _REPLY_TOOL_INTERNAL_ARGUMENTS
     }
-    # 提供给回复 Hook 的可信调用上下文，不进入模型回复参考正文。
-    reply_tool_args["_host_context"] = {
-        "stream_id": tool_ctx.runtime.session_id,
-        "account_id": tool_ctx.runtime.chat_stream.account_id,
-        "user_id": tool_ctx.runtime.chat_stream.user_id,
-        "platform": tool_ctx.runtime.chat_stream.platform,
-        "is_group_chat": tool_ctx.runtime.chat_stream.is_group_session,
-        "logical_turn_id": tool_ctx.engine._active_logical_turn_id,
-    }
     if not _use_expression_intent():
         reply_tool_args.pop("expression_intent", None)
 
@@ -491,7 +482,11 @@ async def execute_reply(
         )
 
     response_target_message = target_message
-    reply_tool_args["_host_context"]["reply_target_message_id"] = target_message_id
+    from src.plugin_runtime.context_views import reply_host_context
+    reply_tool_args["_host_context"] = reply_host_context(
+        tool_ctx.runtime, logical_turn_id=tool_ctx.engine._active_logical_turn_id,
+        target_message_id=target_message_id,
+    )
 
     draft_revision=tool_ctx.runtime._context_revision
     execution_parameters={**invocation_arguments,"_host_draft_revision":draft_revision}

@@ -80,7 +80,9 @@ from .adapter_base import (
     await_task_with_interrupt,
 )
 from .base_client import (
+    AUDIO_TRANSCRIPTION_OPTION_KEYS,
     APIResponse,
+    AudioTranscriptionOptions,
     AudioTranscriptionRequest,
     EmbeddingRequest,
     ImageEmbeddingRequest,
@@ -2119,21 +2121,17 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
             "request_kwargs": {},
         }
 
-        audio_keys = {"audio_transcription_mode", "transcription_prompt", "audio_language", "audio_temperature", "audio_mime_type"}
-        mode = str(extra_params.get("audio_transcription_mode", "transcriptions"))
-        prompt = str(extra_params.get("transcription_prompt", ""))
-        language = str(extra_params.get("audio_language", "")).strip()
-        temperature = float(extra_params.get("audio_temperature", 0.0))
-        if mode == "chat":
-            # Gemini兼容网关的标准对话路由可正确剥离思考内容，且支持实际采样参数。
-            snapshot_provider_request["endpoint"] = "/chat/completions"
-            snapshot_provider_request["operation"] = "chat.completions.create"
         try:
-            request_overrides = split_openai_request_overrides(extra_params, reserved_body_keys=audio_keys)
+            audio = AudioTranscriptionOptions.from_extra_params(extra_params)
+            mode, prompt, language, temperature = audio.mode, audio.prompt, audio.language, audio.temperature
+            if mode == "chat":
+                snapshot_provider_request["endpoint"] = "/chat/completions"
+                snapshot_provider_request["operation"] = "chat.completions.create"
+            request_overrides = split_openai_request_overrides(extra_params, reserved_body_keys=AUDIO_TRANSCRIPTION_OPTION_KEYS)
             if mode == "chat":
                 messages = [{"role": "user", "content": [
                     {"type": "text", "text": prompt or "Transcribe the audio faithfully in its original language. Output only the transcript."},
-                    {"type": "input_audio", "input_audio": {"data": audio_base64, "format": "wav"}},
+                    {"type": "input_audio", "input_audio": {"data": audio_base64, "format": audio.openai_audio_format()}},
                 ]}]
                 snapshot_provider_request["request_kwargs"] = {
                     "model": model_info.model_identifier, "messages": messages,
@@ -2154,13 +2152,15 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
                 ), _extract_usage_record(getattr(raw, "usage", None))
             if mode != "transcriptions":
                 raise ValueError("不支持的ASR请求协议")
-            audio_file: FileTypes = ("audio.wav", io.BytesIO(base64.b64decode(audio_base64)))
+            if temperature > 1:
+                raise ValueError("OpenAI转写接口的温度范围为0至1")
+            audio_file: FileTypes = (audio.openai_file_name(), io.BytesIO(base64.b64decode(audio_base64)))
             snapshot_provider_request["request_kwargs"] = {
                 "audio_base64": audio_base64,
                 "extra_body": request_overrides.extra_body or None,
                 "extra_headers": request_overrides.extra_headers or None,
                 "extra_query": request_overrides.extra_query or None,
-                "file_name": "audio.wav",
+                "file_name": audio.openai_file_name(),
                 "model": model_info.model_identifier,
                 "prompt": prompt or None, "language": language or None, "temperature": temperature,
             }

@@ -62,8 +62,7 @@ async def test_denied_or_explicit_termination_never_replays(monkeypatch, reason)
 
 
 @pytest.mark.asyncio
-async def test_empty_choices_strips_images_on_retry_and_switches_model_when_exhausted(monkeypatch):
-    from src.llm_models.exceptions import ModelAttemptFailed
+async def test_empty_choices_retry_is_request_local_and_stops_when_exhausted(monkeypatch):
     from src.llm_models.payload_content.context_item import ContextImagePart, ContextItemMeta, ContextTextPart, UserMessageItem
 
     async def resolve(feature, action, payload):
@@ -93,7 +92,7 @@ async def test_empty_choices_strips_images_on_retry_and_switches_model_when_exha
     orchestrator.request_type, orchestrator.task_name = 'maisaka.planner', 'planner'
     orchestrator._record_success_generation_attempt = Mock()
     orchestrator._schedule_llm_retry_event = Mock()
-    with pytest.raises(ModelAttemptFailed):
+    with pytest.raises(ModelResponseTerminatedError):
         await orchestrator._attempt_request_on_model(provider, client, request)
     assert client.get_response.await_count == 2
     first_req = client.get_response.await_args_list[0].args[0]

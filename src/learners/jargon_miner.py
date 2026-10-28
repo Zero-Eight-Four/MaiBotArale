@@ -644,6 +644,8 @@ class JargonMiner:
                 return 0, 0
 
         initial_meanings = before_persist_result.kwargs.get("initial_meanings") or {}
+        admission_available = "initial_meanings" in before_persist_result.kwargs
+        unreviewed = 0
         saved = 0
         updated = 0
         for entry in uniq_entries:
@@ -700,6 +702,7 @@ class JargonMiner:
                 # 新候选没有通过入库前审核并提供初步解释时，不进入人工审核词库。
                 initial_meaning = (initial_meanings or {}).get(content, "").strip()
                 if not initial_meaning:
+                    unreviewed += 1
                     logger.info(f"跳过未通过入库审核的新黑话：{content}")
                     continue
                 # 没找到匹配记录，创建新记录
@@ -733,6 +736,11 @@ class JargonMiner:
             jargon_str = ",".join(jargon_list)
             logger.info(f"[{self.session_name}]疑似黑话: {jargon_str}")
 
+        if unreviewed and not admission_available:
+            logger.warning(
+                "黑话入库审核未提供结果：本批 %s 个新词暂未入库；请检查 Arale-learning 是否启用并正常处理 before_persist。",
+                unreviewed,
+            )
         if saved or updated:
             logger.debug(f"jargon写入: 新增 {saved} 条，更新 {updated} 条，session_id={self.session_id}")
 

@@ -1067,9 +1067,31 @@ class LLMOrchestrator:
         from src.plugin_runtime.policy_bridge import resolve_policy
         original_response_request = request if isinstance(request, ResponseRequest) else None
         active_request: ClientRequest = request
-        empty_choices_attempt = 0
+        empty_output_failures = 0
+
+        def next_empty_failure() -> int:
+            nonlocal empty_output_failures
+            if active_request.trace_context is not None:
+                active_request.trace_context.empty_output_failures += 1
+                return active_request.trace_context.empty_output_failures
+            empty_output_failures += 1
+            return empty_output_failures
+
         if isinstance(active_request, EmbeddingRequest):
             active_request.retry_handled_externally = True
+
+        async def wait_for_empty_retry(delay: float) -> None:
+            flag = active_request.interrupt_flag if isinstance(active_request, ResponseRequest) else None
+            if flag is None:
+                await asyncio.sleep(delay)
+                return
+            if not flag.is_set():
+                try:
+                    await asyncio.wait_for(flag.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+            if flag.is_set():
+                raise ReqAbortException("空输出重试等待期间收到打断")
 
         async def ensure_attempt_snapshot(error: Exception) -> None:
             """确保内置或插件 Provider 的每次失败都有统一快照记录。"""
@@ -1124,16 +1146,19 @@ class LLMOrchestrator:
                 original_error_info = self._get_original_error_info(e)
                 retry_remain -= 1
                 task_display = self.request_type or "未知任务"
-                if retry_remain <= 0:
-                    from src.plugin_runtime.policy_bridge import resolve_policy
-
-                    handled, policy = await resolve_policy("model", "empty_response", {
-                        "task": self.request_type, "model_name": model_info.name,
-                        "attempt": max_attempts,
-                    })
-                    if handled and isinstance(policy, dict) and policy.get("retry") is True and max_attempts < 3:
-                        retry_remain = 1
-                        max_attempts += 1
+                empty_attempt = next_empty_failure()
+                handled, policy = await resolve_policy("model", "empty_response", {
+                    "task": self.request_type, "model_name": model_info.name, "attempt": empty_attempt,
+                })
+                if handled:
+                    if not isinstance(policy, dict):
+                        raise ValueError("Invalid empty response retry policy") from e
+                    if policy.get("retry") is not True or empty_attempt >= 3:
+                        raise ModelResponseTerminatedError("empty_output", response_metadata={
+                            "empty_output_attempt": empty_attempt, "retry_exhausted": True,
+                        }) from e
+                    retry_remain = max(1, retry_remain)
+                    max_attempts = max(max_attempts, empty_attempt + 1)
                 if retry_remain <= 0:
                     logger.error(
                         f"任务 '{task_display}' 的模型 '{model_info.name}' 在 {max_attempts} 次尝试后仍收到空响应。{original_error_info}"
@@ -1143,15 +1168,17 @@ class LLMOrchestrator:
                 logger.warning(
                     f"任务 '{task_display}' 的模型 '{model_info.name}' 返回空回复(可重试){original_error_info}。剩余重试次数: {retry_remain}"
                 )
+                delay = (max(0.0, min(30.0, float(policy.get("retry_after", api_provider.retry_interval))))
+                         if handled else api_provider.retry_interval)
                 self._schedule_llm_retry_event(
                     model_name=model_info.name,
                     attempt=max_attempts - retry_remain + 1,
                     max_attempts=max_attempts,
                     reason="模型返回空回复",
-                    retry_interval=api_provider.retry_interval,
+                    retry_interval=delay,
                 )
-                await asyncio.to_thread(update_failed_request_attempt, e, status="retrying", retry_interval=api_provider.retry_interval)
-                await asyncio.sleep(api_provider.retry_interval)
+                await asyncio.to_thread(update_failed_request_attempt, e, status="retrying", retry_interval=delay)
+                await wait_for_empty_retry(delay)
 
             except NetworkConnectionError as e:
                 await ensure_attempt_snapshot(e)
@@ -1207,7 +1234,9 @@ class LLMOrchestrator:
                 # responses. Other terminal failures never enter retry or fallback.
                 if e.reason == "empty_choices":
                     await ensure_attempt_snapshot(e)
-                    empty_choices_attempt += 1
+                    if e.failure_kind == "provider_safety":
+                        raise
+                    empty_choices_attempt = next_empty_failure()
                     from src.llm_models.payload_content.context_protocol import ContextProtocolMode
                     from src.plugin_runtime.hook_payloads import deserialize_prompt_items, serialize_prompt_items
                     serialized_context = (
@@ -1223,6 +1252,11 @@ class LLMOrchestrator:
                         **e.response_metadata,
                     })
                     if isinstance(decision, dict):
+                        block_reason = str(decision.get("block_reason") or "")
+                        if block_reason:
+                            e.response_metadata["prompt_feedback"] = {"blockReason": block_reason}
+                        if e.failure_kind == "provider_safety":
+                            raise
                         updated_context: List[ContextItem] | None = None
                         if isinstance(active_request, ResponseRequest) and active_request.context_items:
                             raw_items = decision.get("context_items")
@@ -1252,22 +1286,11 @@ class LLMOrchestrator:
                                 reason="模型返回空候选", retry_interval=delay,
                             )
                             await asyncio.to_thread(update_failed_request_attempt, e, status="retrying", retry_interval=delay)
-                            flag = active_request.interrupt_flag if isinstance(active_request, ResponseRequest) else None
-                            if flag is not None:
-                                try:
-                                    await asyncio.wait_for(flag.wait(), timeout=delay)
-                                except asyncio.TimeoutError:
-                                    pass
-                                if flag.is_set():
-                                    raise ReqAbortException("空候选重试等待期间收到打断") from e
-                            else:
-                                await asyncio.sleep(delay)
+                            await wait_for_empty_retry(delay)
                             continue
-                        if handled and decision.get("switch_model") is True:
-                            raise ModelAttemptFailed(
-                                f"模型 '{model_info.name}' 返回空候选，按策略切换候选模型",
-                                original_exception=e,
-                            ) from e
+                        if handled:
+                            e.response_metadata.update(empty_output_attempt=empty_choices_attempt, retry_exhausted=True)
+
                 raise
 
             except EmbeddingQuotaCooldownError:

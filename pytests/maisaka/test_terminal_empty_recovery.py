@@ -17,7 +17,7 @@ class Hooks:
     async def invoke_hook(self,name,**kwargs):
         self.calls.append((name,kwargs))
         if name=='maisaka.replyer.after_response':
-            assert kwargs['reply_tool_args']['arale_generation_failure']=='provider_safety'
+            assert kwargs['reply_tool_args']['arale_generation_failure']=='empty_output'
             kwargs={**kwargs,'response':'recovered status','retry':False}
         return SimpleNamespace(kwargs=kwargs)
 
@@ -31,7 +31,7 @@ async def test_planner_terminal_empty_reaches_recovery_hook(monkeypatch):
     monkeypatch.setattr(MaisakaChatLoopService,'_get_runtime_manager',staticmethod(lambda:hooks))
     response=await service.chat_loop_step([],tool_definitions=[],logical_turn_id='turn')
     after=next(k for n,k in hooks.calls if n=='maisaka.planner.after_response')
-    assert after['arale_generation_failure']=='provider_safety'
+    assert after['arale_generation_failure']=='empty_output'
     assert after['arale_safety_meta']['logical_turn_id']=='turn'
     assert response.output_items == ()
     model.generate_response_with_context.assert_awaited_once()

@@ -5,6 +5,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Literal, Set, Tuple, Ty
 import asyncio
 import copy
 import dataclasses
+import math
 import time
 import uuid
 
@@ -26,6 +27,51 @@ from src.llm_models.payload_content.resp_format import RespFormat
 from src.llm_models.payload_content.tool_option import ToolCall, ToolOption
 
 logger = get_logger("model_client_registry")
+
+
+AUDIO_TRANSCRIPTION_OPTION_KEYS = frozenset({
+    "audio_transcription_mode", "transcription_prompt", "audio_language", "audio_temperature", "audio_mime_type",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class AudioTranscriptionOptions:
+    """Validated shared ASR options; each client retains its own wire protocol."""
+
+    mode: str
+    prompt: str
+    language: str
+    temperature: float
+    mime_type: str
+
+    @classmethod
+    def from_extra_params(cls, params: Dict[str, Any], *, default_prompt: str = "") -> "AudioTranscriptionOptions":
+        mode = str(params.get("audio_transcription_mode", "transcriptions")).strip().lower()
+        if mode not in {"chat", "transcriptions"}:
+            raise ValueError("不支持的ASR请求协议")
+        temperature = float(params.get("audio_temperature", 0.0))
+        if not math.isfinite(temperature) or not 0 <= temperature <= 2:
+            raise ValueError("ASR温度必须是0至2之间的有限数值")
+        mime_type = str(params.get("audio_mime_type", "audio/wav")).strip().lower().split(";", 1)[0]
+        if not mime_type.startswith("audio/"):
+            raise ValueError("ASR输入必须声明音频MIME类型")
+        return cls(mode, str(params.get("transcription_prompt", default_prompt)),
+                   str(params.get("audio_language", "")).strip(), temperature, mime_type)
+
+    def openai_audio_format(self) -> str:
+        formats = {"audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
+                   "audio/mpeg": "mp3", "audio/mp3": "mp3"}
+        if self.mime_type not in formats:
+            raise ValueError("OpenAI音频聊天模式仅支持WAV或MP3")
+        return formats[self.mime_type]
+
+    def openai_file_name(self) -> str:
+        formats = {"audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav", "audio/mpeg": "mp3",
+                   "audio/mp3": "mp3", "audio/flac": "flac", "audio/ogg": "ogg", "audio/webm": "webm",
+                   "audio/mp4": "mp4", "audio/m4a": "m4a", "audio/x-m4a": "m4a"}
+        if self.mime_type not in formats:
+            raise ValueError("OpenAI转写接口不支持该音频容器")
+        return "audio." + formats[self.mime_type]
 
 
 @dataclass
@@ -253,6 +299,8 @@ class RequestTraceContext:
     generation_attempts: List[GenerationAttempt] = field(default_factory=list)
     # Request-local projection shared only by retries/model switches of this logical call.
     sanitized_context_items: List[ContextItem] | None = None
+    # One budget across empty body/candidate failures within this logical request.
+    empty_output_failures: int = 0
 
     def replace_attempt_status(self, attempt_number: int, status: str) -> None:
         """更新指定 Provider 尝试的后续调度状态。"""

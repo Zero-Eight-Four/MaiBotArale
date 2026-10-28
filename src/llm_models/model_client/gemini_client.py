@@ -51,6 +51,7 @@ from src.config.model_configs import APIProvider
 from src.llm_models.exceptions import (
     EmbeddingQuotaCooldownError,
     EmptyResponseException,
+    ModelResponseTerminatedError,
     NetworkConnectionError,
     ReqAbortException,
     RespNotOkException,
@@ -83,7 +84,9 @@ from .adapter_base import (
     await_task_with_interrupt,
 )
 from .base_client import (
+    AUDIO_TRANSCRIPTION_OPTION_KEYS,
     APIResponse,
+    AudioTranscriptionOptions,
     AudioTranscriptionRequest,
     EmbeddingRequest,
     ImageEmbeddingRequest,
@@ -138,11 +141,7 @@ GENERATE_CONFIG_RESERVED_EXTRA_PARAMS = {
     "thinking_budget",
     "include_thoughts",
     "enable_google_search",
-    "transcription_prompt",
-    "audio_mime_type",
-    "audio_language",
-    "audio_temperature",
-    "audio_transcription_mode",
+    *AUDIO_TRANSCRIPTION_OPTION_KEYS,
 }
 """由当前客户端自行处理、不再直接透传给 `GenerateContentConfig` 的额外参数。"""
 
@@ -443,6 +442,24 @@ def _extract_usage_record(response: GenerateContentResponse) -> Optional[UsageTu
     return prompt_tokens, completion_tokens, total_tokens, False
 
 
+def _raise_if_provider_blocked(response: GenerateContentResponse | None) -> None:
+    """Keep explicit provider blocks distinct from an unexplained empty response."""
+    if response is None:
+        return
+    feedback = response.prompt_feedback
+    block = getattr(feedback, "block_reason", None)
+    reason = str(getattr(block, "value", block) or "").rsplit(".", 1)[-1].upper()
+    if reason and reason not in {"BLOCK_REASON_UNSPECIFIED", "UNSPECIFIED", "NONE"}:
+        raise ModelResponseTerminatedError(
+            "blocked", response_metadata={"prompt_feedback": {"blockReason": reason}}
+        )
+    for candidate in _get_candidates(response):
+        finish = getattr(candidate, "finish_reason", None)
+        finish = str(getattr(finish, "value", finish) or "").rsplit(".", 1)[-1].upper()
+        if finish in {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY"}:
+            raise ModelResponseTerminatedError("blocked", response_metadata={"finish_reason": finish})
+
+
 def _extract_finish_reason(response: GenerateContentResponse | None) -> str | None:
     """提取 Gemini 响应的结束原因。
 
@@ -603,6 +620,7 @@ def _build_stream_api_response(
     content_buffer.close()
     reasoning_buffer.close()
 
+    _raise_if_provider_blocked(last_response)
     _warn_if_max_tokens_truncated(last_response, content or None, tool_calls_buffer or None)
     if not content and not tool_calls_buffer and not reasoning_content:
         raise EmptyResponseException(last_response)
@@ -688,6 +706,7 @@ def _default_normal_response_parser(
     Raises:
         EmptyResponseException: 响应中既无正文也无工具调用且无思考内容时抛出。
     """
+    _raise_if_provider_blocked(response)
     visible_parts: List[str] = []
     reasoning_parts: List[str] = []
 
@@ -1132,7 +1151,7 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             )
             attach_request_snapshot(wrapped_error, snapshot_path)
             raise wrapped_error from exc
-        except EmptyResponseException as exc:
+        except (EmptyResponseException, ModelResponseTerminatedError) as exc:
             snapshot_path = await asyncio.to_thread(
                 save_failed_request_snapshot,
                 api_provider=self.api_provider,
@@ -1171,7 +1190,7 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             raise wrapped_error from exc
         except (UnknownFunctionCallArgumentError, UnsupportedFunctionError, FunctionInvocationError) as exc:
             raise RespParseException(None, f"Gemini 工具调用参数错误: {exc}") from exc
-        except EmptyResponseException:
+        except (EmptyResponseException, ModelResponseTerminatedError):
             raise
         except Exception as exc:
             raise NetworkConnectionError(str(exc)) from exc
@@ -1247,7 +1266,8 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             if status_code == 429:
                 handled, policy = await resolve_policy("model", "embedding_error", {
                     "credential_fingerprint":cooldown_key,"details":exc.details})
-                if handled:retry_at=policy.get("retry_at")
+                if handled:
+                    retry_at = policy.get("retry_at")
             snapshot_path = await asyncio.to_thread(
                 save_failed_request_snapshot,
                 api_provider=self.api_provider,
@@ -1351,15 +1371,11 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             "request_kwargs": {},
         }
 
-        transcription_prompt = str(
-            extra_params.get(
-                "transcription_prompt",
-                "Generate a transcript of the speech. The language of the transcript should match the speech.",
-            )
-        )
-        audio_mime_type = str(extra_params.get("audio_mime_type", "audio/wav"))
-
         try:
+            audio = AudioTranscriptionOptions.from_extra_params(
+                extra_params, default_prompt="Generate a transcript of the speech. The language of the transcript should match the speech.",
+            )
+            transcription_prompt, audio_mime_type = audio.prompt, audio.mime_type
             model_identifier, _ = self._resolve_model_identifier(model_info.model_identifier, extra_params)
             contents: List[ContentUnion] = [
                 Content(
@@ -1376,7 +1392,7 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
                 tool_options=None,
                 response_format=None,
                 max_tokens=max_tokens,
-                temperature=float(extra_params.get("audio_temperature", 0.0)),
+                temperature=audio.temperature,
                 extra_params=extra_params,
                 enable_google_search=False,
             )
@@ -1429,7 +1445,7 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             )
             wrapped_error = (
                 exc
-                if isinstance(exc, (EmptyResponseException, RespParseException))
+                if isinstance(exc, (EmptyResponseException, ModelResponseTerminatedError, RespParseException, ValueError))
                 else NetworkConnectionError(str(exc))
             )
             attach_request_snapshot(wrapped_error, snapshot_path)

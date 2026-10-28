@@ -964,6 +964,8 @@ class ExpressionLearner:
         review_session_id = session_id or self.session_id
         if isinstance(review_result, dict) and type(review_result.get("suitable")) is bool:
             suitable, reason, error = review_result["suitable"], str(review_result.get("reason") or ""), review_result.get("error")
+        elif review_result is not None:
+            suitable, reason, error = False, "审核结果结构无效，暂不入库", "invalid_review_result"
         else:
             suitable, reason, error = await check_expression_suitability(situation, style, session_id=review_session_id)
         if error:

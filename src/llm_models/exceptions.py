@@ -83,13 +83,26 @@ class RespNotOkException(Exception):
 
 
 class ModelResponseTerminatedError(RespNotOkException):
-    """上游没有可用候选或明确终止生成；不可重放或切换模型。"""
+    """上游没有可用输出或明确终止生成；保留真实终止类别。"""
 
     def __init__(self, reason: str, status_code: int = 422, response_metadata: Dict[str, Any] | None = None):
         self.reason = reason
         self.response_metadata = response_metadata or {}
         message = "地区不支持，本次模型任务已取消" if reason.startswith("unsupported_location") else f"上游未提供可用输出（{reason}）"
         super().__init__(status_code, message)
+
+    @property
+    def failure_kind(self) -> str:
+        """Classify only explicit provider feedback as a safety refusal."""
+        if self.reason.lower() in {"safety", "content_filter", "prohibited_content", "blocked"}:
+            return "provider_safety"
+        feedback = self.response_metadata.get("prompt_feedback") or {}
+        if not isinstance(feedback, dict):
+            feedback = {}
+        block = str(feedback.get("blockReason") or feedback.get("block_reason") or "").strip().upper()
+        if block and block not in {"BLOCK_REASON_UNSPECIFIED", "UNSPECIFIED", "NONE"}:
+            return "provider_safety"
+        return "empty_output" if self.reason in {"empty_choices", "empty_output"} else "provider_terminated"
 
     def __str__(self):
         return self.message

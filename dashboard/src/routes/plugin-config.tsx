@@ -22,6 +22,7 @@ import { MultiSelect } from '@/components/ui/multi-select'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { CodeEditor } from '@/components/CodeEditor'
 import { useTheme } from '@/components/use-theme'
+import { useMediaQuery } from '@/hooks/use-media-query'
 import {
   Select,
   SelectContent,
@@ -80,6 +81,7 @@ import type {
   InstalledPlugin,
   ConfigFieldSchema,
   ConfigSectionSchema,
+  ConfigTabSchema,
   ItemFieldDefinition,
   PluginRuntimeComponent,
   PluginRuntimeComponentType,
@@ -87,6 +89,7 @@ import type {
 import { PluginIcon } from './plugins/PluginIcon'
 import { ZipInstallDialog } from './plugins/ZipInstallDialog'
 import { getPluginType, getPluginTypeLabel } from './plugins/types'
+import { ConfigWidgetsPanel } from './plugin-config/ConfigWidgetsPanel'
 import { AdapterHostPolicyPanel } from './plugin-config/AdapterHostPolicyPanel'
 import { AdapterManagementView } from './plugin-config/AdapterManagementView'
 import { AdapterPolicyDefaultsCard } from './plugin-config/AdapterPolicyDefaultsCard'
@@ -382,6 +385,7 @@ interface SectionRendererProps {
   section: ConfigSectionSchema
   config: Record<string, unknown>
   onChange: (sectionName: string, fieldName: string, value: unknown) => void
+  initiallyExpanded?: boolean
 }
 
 function getFieldGridClassName(field: ConfigFieldSchema): string {
@@ -392,11 +396,13 @@ function getFieldGridClassName(field: ConfigFieldSchema): string {
   return 'min-w-0'
 }
 
-function SectionRenderer({ sectionName, section, config, onChange }: SectionRendererProps) {
-  const [isOpen, setIsOpen] = useState(!section.collapsed)
+function SectionRenderer({ sectionName, section, config, onChange, initiallyExpanded = false }: SectionRendererProps) {
+  const resolvedSectionName = section.name || sectionName
+  const [isOpen, setIsOpen] = useState(
+    resolvedSectionName !== 'plugin' && (initiallyExpanded || !section.collapsed)
+  )
   const { i18n } = useTranslation()
   const language = i18n.resolvedLanguage || i18n.language || 'zh'
-  const resolvedSectionName = section.name || sectionName
   const sectionConfig = getNestedRecord(config, resolvedSectionName)
   const title = resolveLocalizedText(section.title, language, sectionName, section.i18n, 'title')
   const description = resolveLocalizedText(
@@ -1160,9 +1166,10 @@ interface PluginConfigEditorProps {
 
 function PluginConfigEditor({ plugin, onBack, initialTab }: PluginConfigEditorProps) {
   const { i18n } = useTranslation()
+  const isMobile = useMediaQuery('(max-width: 639px)')
   const language = i18n.resolvedLanguage || i18n.language || 'zh'
   const [documentPanelOpen, setDocumentPanelOpen] = useState(false)
-  const [hostPolicyToolbar, setHostPolicyToolbar] = useState<HTMLDivElement | null>(null)
+  const [configTabToolbar, setConfigTabToolbar] = useState<HTMLDivElement | null>(null)
 
   const {
     editMode,
@@ -1220,9 +1227,36 @@ function PluginConfigEditor({ plugin, onBack, initialTab }: PluginConfigEditorPr
     ([, a], [, b]) => (a.order ?? 0) - (b.order ?? 0)
   )
   const schemaTabs = schema?.layout.type === 'tabs' ? schema.layout.tabs : []
-  const selectedConfigTab = schemaTabs.some((tab) => tab.id === activeConfigTab)
+  // 保留插件声明的布局；仅移动端为未分组的多节配置生成横向切换标签。
+  const configTabs: ConfigTabSchema[] = schemaTabs.length > 0
+    ? schemaTabs
+    : isMobile && sortedSections.length > 1
+      ? sortedSections.map(([sectionName, section]) => ({
+          id: sectionName,
+          title: section.title,
+          i18n: section.i18n,
+          sections: [sectionName],
+          order: section.order,
+        }))
+      : []
+  const selectedConfigTab = configTabs.some((tab) => tab.id === activeConfigTab)
     ? activeConfigTab
-    : schemaTabs[0]?.id
+    : configTabs[0]?.id
+  const showConfigTabs = pluginPageTab === 'settings' && editMode === 'visual' && configTabs.length > 0
+  const configTabList = (
+    <TabsList aria-label="配置分组" className={cn(isMobile && 'h-auto w-max justify-start')}>
+      {configTabs.map((tab) => (
+        <TabsTrigger key={tab.id} value={tab.id} className={cn(isMobile && 'shrink-0')}>
+          {resolveLocalizedText(tab.title, language, tab.id, tab.i18n, 'title')}
+          {tab.badge && (
+            <Badge variant="secondary" className="ml-2 text-xs">
+              {tab.badge}
+            </Badge>
+          )}
+        </TabsTrigger>
+      ))}
+    </TabsList>
+  )
 
   // 获取当前启用状态
   const isEnabled = !configError && (config.plugin as Record<string, unknown>)?.enabled !== false
@@ -1269,18 +1303,28 @@ function PluginConfigEditor({ plugin, onBack, initialTab }: PluginConfigEditorPr
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div className="flex min-w-0 flex-wrap items-center gap-2 lg:flex-nowrap">
-            <h1 className="min-w-0 truncate text-lg font-semibold sm:text-xl" data-plugin-config-title>
+            <h1 className="min-w-0 truncate text-base font-semibold sm:text-lg" data-plugin-config-title>
               {pluginName}
             </h1>
-            <Badge variant={isEnabled ? 'default' : 'secondary'} className="shrink-0">
-              {configError ? '配置错误，业务暂停' : isEnabled ? '已启用' : '已禁用'}
-            </Badge>
+            {(configError || !isEnabled) && (
+              <Badge variant="secondary" className="shrink-0">
+                {configError ? '配置错误，业务暂停' : '已禁用'}
+              </Badge>
+            )}
             <span className="text-muted-foreground shrink-0 text-sm">
               v{schema?.plugin_info.version || plugin.manifest.version}
             </span>
           </div>
         </div>
         <div className="grid min-w-0 auto-cols-fr grid-flow-col items-center gap-1 whitespace-nowrap max-lg:[&>*]:min-w-0 max-lg:[&>button]:!px-1 max-lg:[&>button]:!text-xs max-lg:[&>button>svg]:hidden lg:flex lg:shrink-0 lg:gap-3">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8"
+            onClick={() => setPluginPageTab(pluginPageTab === 'settings' ? 'details' : 'settings')}
+          >
+            {pluginPageTab === 'settings' ? '查看详情' : '查看设置'}
+          </Button>
           {pluginPageTab !== 'details' && (
             <Button
               variant="outline"
@@ -1326,16 +1370,14 @@ function PluginConfigEditor({ plugin, onBack, initialTab }: PluginConfigEditorPr
             />
             <span className="text-xs">启用</span>
           </div>
-          {pluginPageTab !== 'host-policy' && (
-            <Button size="sm" className="h-8" onClick={handleSave} disabled={!hasChanges || saving}>
-              {saving ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Save className="mr-2 h-4 w-4" />
-              )}
-              保存
-            </Button>
-          )}
+          <Button size="sm" className="h-8" onClick={handleSave} disabled={!hasChanges || saving}>
+            {saving ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="mr-2 h-4 w-4" />
+            )}
+            保存
+          </Button>
         </div>
       </div>
 
@@ -1353,127 +1395,127 @@ function PluginConfigEditor({ plugin, onBack, initialTab }: PluginConfigEditorPr
 
       <Tabs
         value={pluginPageTab}
-        onValueChange={(value) => setPluginPageTab(value as 'settings' | 'host-policy' | 'details')}
+        onValueChange={(value) => setPluginPageTab(value as 'settings' | 'details')}
+        className="min-w-0"
       >
-        <div className="flex flex-wrap items-center gap-3">
-          <TabsList>
-            <TabsTrigger value="settings">设置</TabsTrigger>
-            {showHostPolicy && <TabsTrigger value="host-policy">黑白名单规则</TabsTrigger>}
-            <TabsTrigger value="details">详情</TabsTrigger>
-          </TabsList>
-          {/* 黑白名单页的账号、分组操作与保存工具栏渲染到页签同一行，节省纵向空间 */}
-          {showHostPolicy && <div ref={setHostPolicyToolbar} className="min-w-0 flex-1" />}
-        </div>
+        {/* 移动端配置标签保留横向滚动区域；桌面端按插件原始布局展示配置。 */}
+        {isMobile && showConfigTabs && (
+          <div className="min-w-0 overflow-x-auto overflow-y-hidden overscroll-x-contain">
+            <div ref={setConfigTabToolbar} className="w-max px-1 py-1" />
+          </div>
+        )}
         <TabsContent value="settings" className="mt-4">
-          {configError && (
-            <Alert variant="destructive" className="mb-4">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>
-                <p>配置校验失败，工具和调度已暂停。请修正下方原始 TOML 并保存，校验通过后恢复运行。</p>
-                <pre className="mt-2 whitespace-pre-wrap break-words text-xs">{configError}</pre>
-              </AlertDescription>
-            </Alert>
-          )}
-          {/* 源代码模式 */}
-          {editMode === 'source' && (
-            <div className="space-y-4">
-              <Alert>
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>
-                  <strong>文件模式：</strong>直接编辑原始配置文件。此功能仅适用于熟悉
-                  TOML语法的用户。只有格式完全正确才能保存。
-                  {hasTomlError && (
-                    <span className="text-destructive ml-2 font-semibold">
-                      ⚠️ 上次保存失败，请检查 TOML 格式
-                    </span>
-                  )}
-                </AlertDescription>
-              </Alert>
-
-              <CodeEditor
-                value={sourceCode}
-                onChange={handleSourceCodeChange}
-                language="toml"
-                height="calc(100vh - 350px)"
-                minHeight="500px"
-                placeholder="TOML 配置内容"
-              />
-            </div>
-          )}
-
-          {/* 可视化模式 */}
-          {editMode === 'visual' && schema && (
-            <>
-              {/* 配置区域 */}
-              {schema.layout.type === 'tabs' && schemaTabs.length > 0 ? (
-                // 标签页布局
-                <Tabs value={selectedConfigTab} onValueChange={handleConfigTabChange}>
-                  <TabsList>
-                    {schemaTabs.map((tab) => (
-                      <TabsTrigger key={tab.id} value={tab.id}>
-                        {resolveLocalizedText(tab.title, language, tab.id, tab.i18n, 'title')}
-                        {tab.badge && (
-                          <Badge variant="secondary" className="ml-2 text-xs">
-                            {tab.badge}
-                          </Badge>
-                        )}
-                      </TabsTrigger>
-                    ))}
-                  </TabsList>
-                  {schemaTabs.map((tab) => (
-                    <TabsContent key={tab.id} value={tab.id} className="mt-4 space-y-4">
-                      {tab.sections.map((sectionName) => {
-                        const section = schema.sections[sectionName]
-                        if (!section) return null
-                        return (
-                          <SectionRenderer
-                            key={sectionName}
-                            sectionName={sectionName}
-                            section={section}
-                            config={config}
-                            onChange={handleFieldChange}
-                          />
-                        )
-                      })}
-                    </TabsContent>
-                  ))}
-                </Tabs>
-              ) : (
-                // 自动布局
+          <div className={cn(showHostPolicy && 'grid min-w-0 grid-cols-1 items-start gap-6 xl:grid-cols-2')}>
+            {showHostPolicy && (
+              <section className="min-w-0 space-y-4 xl:order-2" aria-label="黑白名单规则">
+                <h2 className="text-base font-medium">黑白名单规则</h2>
+                <AdapterHostPolicyPanel pluginId={plugin.id} />
+              </section>
+            )}
+            <div className="min-w-0 xl:order-1">
+              {showHostPolicy && <h2 className="mb-4 text-base font-medium">设置</h2>}
+              {!configError && !!schema?.runtime_widgets?.length && (
+                <ConfigWidgetsPanel key={plugin.id} pluginId={plugin.id} />
+              )}
+              {configError && (
+                <Alert variant="destructive" className="mb-4">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    <p>配置校验失败，工具和调度已暂停。请修正下方原始 TOML 并保存，校验通过后恢复运行。</p>
+                    <pre className="mt-2 whitespace-pre-wrap break-words text-xs">{configError}</pre>
+                  </AlertDescription>
+                </Alert>
+              )}
+              {/* 源代码模式 */}
+              {editMode === 'source' && (
                 <div className="space-y-4">
-                  {sortedSections.map(([sectionName, section]) => (
-                    <SectionRenderer
-                      key={sectionName}
-                      sectionName={sectionName}
-                      section={section}
-                      config={config}
-                      onChange={handleFieldChange}
-                    />
-                  ))}
+                  <Alert>
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>
+                      <strong>文件模式：</strong>直接编辑原始配置文件。此功能仅适用于熟悉
+                      TOML语法的用户。只有格式完全正确才能保存。
+                      {hasTomlError && (
+                        <span className="text-destructive ml-2 font-semibold">
+                          ⚠️ 上次保存失败，请检查 TOML 格式
+                        </span>
+                      )}
+                    </AlertDescription>
+                  </Alert>
+
+                  <CodeEditor
+                    value={sourceCode}
+                    onChange={handleSourceCodeChange}
+                    language="toml"
+                    height="calc(100vh - 350px)"
+                    minHeight="500px"
+                    placeholder="TOML 配置内容"
+                  />
                 </div>
               )}
-            </>
-          )}
-          <div className="mt-6">
-            <PluginRuntimeComponentsPanel key={plugin.id} pluginId={plugin.id} />
-          </div>
-          <div className="mt-6 border-t pt-4">
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-destructive hover:text-destructive"
-              onClick={() => setResetDialogOpen(true)}
-            >
-              <RotateCcw className="mr-2 h-4 w-4" />
-              重置
-            </Button>
+
+              {/* 可视化模式 */}
+              {editMode === 'visual' && schema && (
+                <>
+                  {/* 配置区域 */}
+                  {configTabs.length > 0 ? (
+                    // 标签页布局
+                    <Tabs value={selectedConfigTab} onValueChange={handleConfigTabChange}>
+                      {/* 移动端通过 Portal 并排显示，保留独立的配置 Tabs 上下文。 */}
+                      {isMobile
+                        ? configTabToolbar && createPortal(configTabList, configTabToolbar)
+                        : configTabList}
+                      {configTabs.map((tab) => (
+                        <TabsContent key={tab.id} value={tab.id} className="mt-0 space-y-4 sm:mt-4">
+                          {tab.sections.map((sectionName) => {
+                            const section = schema.sections[sectionName]
+                            if (!section) return null
+                            return (
+                              <SectionRenderer
+                                key={sectionName}
+                                sectionName={sectionName}
+                                section={section}
+                                config={config}
+                                onChange={handleFieldChange}
+                                initiallyExpanded={isMobile && schemaTabs.length === 0}
+                              />
+                            )
+                          })}
+                        </TabsContent>
+                      ))}
+                    </Tabs>
+                  ) : (
+                    // 自动布局
+                    <div className="space-y-4">
+                      {sortedSections.map(([sectionName, section]) => (
+                        <SectionRenderer
+                          key={sectionName}
+                          sectionName={sectionName}
+                          section={section}
+                          config={config}
+                          onChange={handleFieldChange}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+              <div className="mt-6">
+                <PluginRuntimeComponentsPanel key={plugin.id} pluginId={plugin.id} />
+              </div>
+              <div className="mt-6 border-t pt-4">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => setResetDialogOpen(true)}
+                >
+                  <RotateCcw className="mr-2 h-4 w-4" />
+                  重置
+                </Button>
+              </div>
+            </div>
           </div>
         </TabsContent>
-        {showHostPolicy && (
-          <TabsContent value="host-policy" className="mt-4">
-            <AdapterHostPolicyPanel pluginId={plugin.id} toolbarContainer={hostPolicyToolbar} />
-          </TabsContent>
-        )}
         <TabsContent value="details" className="mt-4">
           <PluginDetailsPanel
             plugin={plugin}
@@ -1749,6 +1791,7 @@ function PluginConfigPageContent() {
 
         {adapterManagement ? (
           <AdapterManagementView
+            onInstalled={() => void loadPlugins()}
             groups={visiblePluginGroups}
             defaults={<AdapterPolicyDefaultsCard />}
             loading={loading}

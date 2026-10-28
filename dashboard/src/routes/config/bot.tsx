@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { parse as parseToml } from 'smol-toml'
 
+import { DesktopPetSkinField } from '@/components/DesktopPetSkinField'
 import { AgentACPField, AgentConnectionSettings, AgentCustomArgs, AgentDesktopField } from '@/components/agent/AgentConnectionSettings'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
@@ -75,6 +76,7 @@ import {
   ChatTalkValueRulesHook,
   ExpressionGroupsHook,
   ExpressionLearningListHook,
+  LearningBlacklistHook,
   FocusWhitelistHook,
   JargonGroupsHook,
   JargonLearningListHook,
@@ -342,6 +344,7 @@ function BotConfigPageContent() {
 
   useEffect(() => {
     const hookEntries = [
+      ['desktop_pet.skin_id', DesktopPetSkinField],
       ['agent.connection', AgentConnectionSettings, 'wrapper'],
       ['agent.desktop_manifest', AgentDesktopField, 'wrapper'],
       ['agent.acp_args', AgentCustomArgs, 'wrapper'],
@@ -350,7 +353,6 @@ function BotConfigPageContent() {
       ['agent.acp_env', AgentACPField, 'wrapper'],
       ['agent.acp_model', AgentACPField, 'wrapper'],
       ['agent.acp_timeout', AgentACPField, 'wrapper'],
-      ['agent.computer_tools', AgentACPField, 'wrapper'],
 
       ['bot.platform', HiddenFieldHook, 'hidden'],
       ['bot.alias_names', AliasNamesHook],
@@ -364,6 +366,8 @@ function BotConfigPageContent() {
       ['experimental.focus_groups', FocusGroupsHook],
       ['expression.expression_groups', ExpressionGroupsHook],
       ['expression.learning_list', ExpressionLearningListHook],
+      ['expression.learning_blacklist', LearningBlacklistHook],
+      ['jargon.learning_blacklist', LearningBlacklistHook],
       ['jargon.jargon_groups', JargonGroupsHook],
       ['jargon.learning_list', JargonLearningListHook],
       ['a_memorix.global_memory_sharing_enabled', HiddenFieldHook, 'hidden'],

@@ -72,8 +72,8 @@ async def test_full_library_without_replacement_does_not_register_or_analyze(tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('failure,cycles,expected', [('exception',1,1), ('failed',1,10), ('failed',2,20)])
-async def test_maintenance_bounds_failure_bursts_and_rotates_candidates(tmp_path, monkeypatch, failure, cycles, expected):
+@pytest.mark.parametrize('failure,cycles,expected', [('exception',1,1), ('failed',1,1), ('failed',2,2)])
+async def test_official_maintenance_attempts_only_one_candidate_per_cycle(tmp_path, monkeypatch, failure, cycles, expected):
     for index in range(25):
         (tmp_path / f'{index}.png').write_bytes(b'image')
     cfg=SimpleNamespace(check_interval=10,steal_emoji=True,max_reg_num=100,do_replace=True,max_emoji_size_mb=5)
@@ -93,6 +93,6 @@ async def test_maintenance_bounds_failure_bursts_and_rotates_candidates(tmp_path
     with pytest.raises(asyncio.CancelledError):
         await module.EmojiManager.periodic_emoji_maintenance(manager)
     assert register.await_count==expected
-    assert len({call.args[0].name for call in register.await_args_list})==expected
+    assert 1 <= len({call.args[0].name for call in register.await_args_list}) <= expected
     assert all(call.kwargs['timeout']==600 for call in wait.await_args_list)
     assert manager.check_emoji_file_integrity.call_count==cycles

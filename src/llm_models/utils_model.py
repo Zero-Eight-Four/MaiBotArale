@@ -1065,13 +1065,6 @@ class LLMOrchestrator:
         max_attempts = retry_remain
         model_info = request.model_info
         from src.plugin_runtime.policy_bridge import resolve_policy
-        region_key = hashlib.sha256(json.dumps([
-            api_provider.name, api_provider.base_url, api_provider.api_key,
-            model_info.model_identifier, self.request_type,
-        ]).encode()).hexdigest()
-        handled, admission = await resolve_policy("model", "region_prepare", {"key": region_key, "now": time.time()})
-        if handled and admission.get("allow") is False:
-            raise ModelResponseTerminatedError("unsupported_location_cooldown", status_code=400)
         original_response_request = request if isinstance(request, ResponseRequest) else None
         active_request: ClientRequest = request
         empty_choices_attempt = 0
@@ -1247,7 +1240,7 @@ class LLMOrchestrator:
                             if updated_context is not None:
                                 active_request = active_request.copy_with(context_items=updated_context)
                                 if active_request.trace_context is not None:
-                                    setattr(active_request.trace_context, "sanitized_context_items", updated_context)
+                                    active_request.trace_context.sanitized_context_items = updated_context
                         if (handled and decision.get("retry") is True
                                 and empty_choices_attempt < 3):
                             delay = max(0.0, min(30.0, float(decision.get("retry_after", 3))))
@@ -1286,7 +1279,6 @@ class LLMOrchestrator:
                 # parameter retry or permission to replay it through a fallback.
                 detail = str(e.message or "") + " " + str(e.__cause__ or "")
                 if e.status_code == 400 and "User location is not supported for the API use" in detail:
-                    await resolve_policy("model", "region_failed", {"key": region_key, "now": time.time()})
                     raise ModelResponseTerminatedError("unsupported_location", status_code=400) from e
                 await ensure_attempt_snapshot(e)
                 original_error_info = self._get_original_error_info(e)
@@ -1499,7 +1491,7 @@ class LLMOrchestrator:
             trace_context.model_attempt = 0
             context_items: List[ContextItem] = []
             try:
-                sanitized_override = getattr(trace_context, "sanitized_context_items", None)
+                sanitized_override = trace_context.sanitized_context_items
                 if request_type == RequestType.RESPONSE and isinstance(sanitized_override, list) and sanitized_override:
                     context_items = list(sanitized_override)
                 else:

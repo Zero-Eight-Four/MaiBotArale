@@ -256,25 +256,6 @@ def _upgrade_expression_learning_defaults(data: dict[str, Any]) -> list[str]:
     return reasons
 
 
-def _normalize_webui_host_to_list(data: dict[str, Any]) -> list[str]:
-    """
-    8.14.13: 将 WebUI host 从 str 转换为 list[str]。
-    旧配置中 host 为单地址字符串（如 "127.0.0.1"），新配置为列表。
-    """
-    webui = _as_dict(data.get("webui"))
-    if webui is None:
-        return []
-
-    host = webui.get("host")
-    if isinstance(host, list):
-        return []
-    if isinstance(host, str):
-        webui["host"] = [host]
-        return ["webui.host"]
-
-    return []
-
-
 def _move_chat_config_key(chat: dict[str, Any], section_name: str, key: str) -> bool:
     if key not in chat:
         return False
@@ -302,7 +283,6 @@ def _split_chat_config_sections(data: dict[str, Any]) -> list[str]:
     moved_paths: list[str] = []
     timing_keys = (
         "talk_value",
-        "private_talk_value",
         "mentioned_bot_reply",
         "inevitable_at_reply",
         "max_consecutive_wait_count",
@@ -555,6 +535,30 @@ def _merge_wildcard_learning_rules_into_defaults(data: Dict[str, Any]) -> List[s
     return reasons
 
 
+def _migrate_webui_http_bindings(data: Dict[str, Any]) -> List[str]:
+    """8.15.62: 一次性迁移旧 WebUI 监听配置，已存在的 HTTP 字段优先。"""
+    webui = data.get("webui")
+    if not isinstance(webui, dict) or not any(key in webui for key in ("host", "port")):
+        return []
+
+    http = data.setdefault("http", {})
+    if not isinstance(http, dict):
+        raise ValueError("http 配置必须为 TOML 配置节")
+
+    reasons: List[str] = []
+    for key in ("host", "port"):
+        if key not in webui:
+            continue
+        value = webui.pop(key)
+        # 按字段补齐，显式的新值（包括默认值或非法值）均保留，由配置校验处理。
+        if key not in http:
+            if key == "host" and isinstance(value, str):
+                value = [value]
+            http[key] = value
+        reasons.append(f"webui.{key}->http.{key}")
+    return reasons
+
+
 BOT_CONFIG_UPGRADE_HOOKS: tuple[ConfigUpgradeHook, ...] = (
     ConfigUpgradeHook(
         target_version="8.10.11",
@@ -580,11 +584,6 @@ BOT_CONFIG_UPGRADE_HOOKS: tuple[ConfigUpgradeHook, ...] = (
         target_version="8.12.1",
         config_names=("bot_config.toml",),
         migrate=_upgrade_expression_learning_defaults,
-    ),
-    ConfigUpgradeHook(
-        target_version="8.14.13",
-        config_names=("bot_config.toml",),
-        migrate=_normalize_webui_host_to_list,
     ),
     ConfigUpgradeHook(
         target_version="8.14.19",
@@ -615,6 +614,11 @@ BOT_CONFIG_UPGRADE_HOOKS: tuple[ConfigUpgradeHook, ...] = (
         target_version="8.15.37",
         config_names=("bot_config.toml",),
         migrate=_move_planner_message_steering_to_reply_timing,
+    ),
+    ConfigUpgradeHook(
+        target_version="8.15.62",
+        config_names=("bot_config.toml",),
+        migrate=_migrate_webui_http_bindings,
     ),
 )
 

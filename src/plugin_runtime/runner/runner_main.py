@@ -10,6 +10,7 @@
 """
 
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -79,9 +80,11 @@ from src.plugin_runtime.runner.log_handler import RunnerIPCLogHandler
 from src.plugin_runtime.runner.plugin_paths import PluginPaths, build_plugin_paths
 from src.plugin_runtime.runner.plugin_loader import PluginCandidate, PluginLoader, PluginMeta
 from src.plugin_runtime.runner.rpc_client import RPCClient
+from src.plugin_runtime.config_widgets import ConfigWidgetProvider, invoke_widget_action, read_widget_snapshot
 from src.plugin_runtime.webui_schema import load_webui_extension
 
 logger = get_logger("plugin_runtime.runner.main")
+_file_scope: ContextVar[str] = ContextVar("file_scope", default="")
 
 _PLUGIN_ALLOWED_RAW_HOST_METHODS = frozenset(
     {
@@ -460,6 +463,7 @@ class PluginRunner:
         self._start_time: float = time.monotonic()
         self._shutting_down: bool = False
         self._reload_lock: asyncio.Lock = asyncio.Lock()
+        self._config_widget_locks: Dict[str, asyncio.Lock] = {}
         self._inflight_rpcs: Dict[int, InFlightRPC] = {}
 
         # IPC 日志 Handler：握手成功后安装，将所有 stdlib logging 转发到 Host
@@ -802,6 +806,8 @@ class PluginRunner:
                     f"插件 {bound_plugin_id} 不允许直接调用 Host 原始 RPC 方法: {normalized_method or '<empty>'}"
                 )
             request_payload = dict(payload or {})
+            if normalized_method == "cap.call" and str(request_payload.get("capability", "")).startswith("files."):
+                request_payload["args"] = {**request_payload.get("args", {}), "file_scope": _file_scope.get()}
             if timeout_ms is None and normalized_method == "cap.call":
                 capability_name = str(request_payload.get("capability") or "").strip()
                 cap_args = request_payload.get("args")
@@ -1308,6 +1314,7 @@ class PluginRunner:
         self._rpc_client.register_method("plugin.prepare_shutdown", self._handle_prepare_shutdown)
         self._rpc_client.register_method("plugin.shutdown", self._handle_shutdown)
         self._rpc_client.register_method("plugin.config_updated", self._handle_config_updated)
+        self._rpc_client.register_method("plugin.config_widgets", self._handle_config_widgets)
         self._rpc_client.register_method("plugin.inspect_config", self._handle_inspect_plugin_config)
         self._rpc_client.register_method("plugin.validate_config", self._handle_validate_plugin_config)
         self._rpc_client.register_method("plugin.reload", self._handle_reload_plugin)
@@ -1589,18 +1596,22 @@ class PluginRunner:
             logger.error(f"插件 {meta.plugin_id} on_load 失败: {exc}", exc_info=True)
             return False
 
-    async def _invoke_plugin_on_unload(self, meta: PluginMeta) -> None:
+    async def _invoke_plugin_on_unload(self, meta: PluginMeta, *, for_reload: bool = False) -> None:
         """执行插件的 ``on_unload`` 生命周期。
 
         Args:
             meta: 待卸载的插件元数据。
+            for_reload: 是否仅为重载暂时卸载；旧插件仍按无参数调用。
         """
         instance = meta.instance
         if meta.config_error or not hasattr(instance, "on_unload"):
             return
 
         try:
-            await self._invoke_plugin_callable(instance.on_unload)
+            if "for_reload" in inspect.signature(instance.on_unload).parameters:
+                await self._invoke_plugin_callable(instance.on_unload, for_reload=for_reload)
+            else:
+                await self._invoke_plugin_callable(instance.on_unload)
         except Exception as exc:
             logger.error(f"插件 {meta.plugin_id} on_unload 失败: {exc}", exc_info=True)
 
@@ -1668,20 +1679,34 @@ class PluginRunner:
         self._loader.set_loaded_plugin(meta)
         return PluginActivationStatus.LOADED
 
-    async def _unload_plugin(self, meta: PluginMeta, reason: str, *, purge_modules: bool = True) -> None:
+    async def _unload_plugin(
+        self, meta: PluginMeta, reason: str, *, purge_modules: bool = True, for_reload: bool = False
+    ) -> None:
         """卸载单个插件并清理 Host/Runner 两侧状态。
 
         Args:
             meta: 待卸载的插件元数据。
             reason: 卸载原因。
             purge_modules: 是否在卸载完成后清理插件模块缓存。
+            for_reload: 是否向支持该参数的插件声明临时卸载。
         """
-        await self._invoke_plugin_on_unload(meta)
+        await self._invoke_plugin_on_unload(meta, for_reload=for_reload)
         await self._unregister_plugin(meta.plugin_id, reason)
         await self._deactivate_plugin(meta)
         self._loader.remove_loaded_plugin(meta.plugin_id)
         if purge_modules:
             self._loader.purge_plugin_modules(meta.plugin_id, meta.plugin_dir)
+
+    async def _release_unrestored_reload_resources(self, previous: Dict[str, PluginMeta]) -> None:
+        """重载后被禁用或恢复失败的插件必须最终释放暂存资源。"""
+        for plugin_id, meta in previous.items():
+            if self._loader.get_plugin(plugin_id) is not None:
+                continue
+            # 只通知显式支持重载保留的插件；旧接口不能重复调用 on_unload。
+            if not hasattr(meta.instance, "on_unload"):
+                continue
+            if "for_reload" in inspect.signature(meta.instance.on_unload).parameters:
+                await self._invoke_plugin_on_unload(meta)
 
     def _collect_reverse_dependents(self, plugin_id: str) -> Set[str]:
         """收集依赖指定插件的所有已加载插件。
@@ -1931,7 +1956,7 @@ class PluginRunner:
             if meta is None:
                 continue
             rollback_metas[unload_plugin_id] = meta
-            await self._unload_plugin(meta, reason=reason, purge_modules=False)
+            await self._unload_plugin(meta, reason=reason, purge_modules=False, for_reload=True)
             self._loader.purge_plugin_modules(unload_plugin_id, meta.plugin_dir)
             unloaded_plugins.append(unload_plugin_id)
 
@@ -2052,6 +2077,7 @@ class PluginRunner:
                         reloaded_meta,
                         reason=f"{reason}_rollback_cleanup",
                         purge_modules=False,
+                        for_reload=True,
                     )
                 except Exception as exc:
                     rollback_failures[reloaded_plugin_id] = f"清理失败: {exc}"
@@ -2074,6 +2100,7 @@ class PluginRunner:
                 if restored != PluginActivationStatus.LOADED:
                     rollback_failures[rollback_plugin_id] = "无法重新激活旧版本"
 
+            await self._release_unrestored_reload_resources(rollback_metas)
             return ReloadPluginsResultPayload(
                 success=False,
                 requested_plugin_ids=normalized_plugin_ids,
@@ -2084,6 +2111,7 @@ class PluginRunner:
                 failed_plugins=self._finalize_failed_reload_messages(failed_plugins, rollback_failures),
             )
 
+        await self._release_unrestored_reload_resources(rollback_metas)
         requested_plugin_success = all(
             plugin_id in reloaded_plugins or plugin_id in inactive_plugins for plugin_id in reload_root_ids
         )
@@ -2148,6 +2176,7 @@ class PluginRunner:
         component_name = invoke.component_name
         handler_method = self._resolve_component_handler(meta, component_name)
         inflight = self._start_inflight_rpc(envelope, component_name)
+        file_scope_token = _file_scope.set(str(invoke.args.pop("_file_scope", "")))
 
         try:
             # 回退: 旧版 LegacyPluginAdapter 通过 invoke_component 统一桥接
@@ -2180,6 +2209,7 @@ class PluginRunner:
                 resp_payload = InvokeResultPayload(success=False, result=str(e))
                 return envelope.make_response(payload=resp_payload.model_dump())
         finally:
+            _file_scope.reset(file_scope_token)
             self._finish_inflight_rpc(inflight)
 
     async def _handle_llm_provider_invoke(self, envelope: Envelope) -> Envelope:
@@ -2421,6 +2451,35 @@ class PluginRunner:
             finally:
                 self._finish_inflight_rpc(inflight)
         return envelope.make_response(payload={"acknowledged": True})
+
+    async def _handle_config_widgets(self, envelope: Envelope) -> Envelope:
+        """操作真实已加载实例；禁止临时实例触发登录等运行时副作用。"""
+        plugin_id = envelope.plugin_id
+        lock = self._config_widget_locks.setdefault(plugin_id, asyncio.Lock())
+        if lock.locked():
+            return envelope.make_error_response(ErrorCode.E_BAD_PAYLOAD.value, "配置页操作进行中，请稍后重试")
+        async with lock:
+            meta = self._loader.get_plugin(plugin_id)
+            if meta is None or meta.config_error:
+                return envelope.make_error_response(ErrorCode.E_BAD_PAYLOAD.value, "插件未运行或配置无效")
+            try:
+                action_id = envelope.payload.get("action_id")
+                if action_id is not None and (not isinstance(action_id, str) or not action_id):
+                    raise ValueError("操作 ID 无效")
+                widgets = self._get_plugin_config_schema(meta).get("runtime_widgets", [])
+                if not widgets:
+                    raise ValueError("插件未声明运行时控件")
+                provider = cast(ConfigWidgetProvider, meta.instance)
+                async with asyncio.timeout(8):
+                    snapshot = await read_widget_snapshot(provider, widgets)
+                    if action_id is not None:
+                        await invoke_widget_action(provider, snapshot, action_id)
+                        snapshot = await read_widget_snapshot(provider, widgets)
+                return envelope.make_response(payload=snapshot.model_dump())
+            except TimeoutError:
+                return envelope.make_error_response(ErrorCode.E_BAD_PAYLOAD.value, "配置页操作超时")
+            except Exception as exc:
+                return envelope.make_error_response(ErrorCode.E_BAD_PAYLOAD.value, f"{type(exc).__name__}: {exc}")
 
     async def _handle_inspect_plugin_config(self, envelope: Envelope) -> Envelope:
         """处理插件配置元数据解析请求。

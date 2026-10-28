@@ -45,7 +45,7 @@ _EMOJI_VLM_NOT_CONFIGURED_MESSAGE = "错误，没有配置视觉模型，无法�
 class EmojiSelectionResult(BaseModel):
     """表情包子代理的结构化选择结果。"""
 
-    emoji_index: int = PydanticField(default=1, description="选中的表情包序号，从 1 开始计数。")
+    emoji_index: int = PydanticField(strict=True, description="选中的表情包序号，从 1 开始计数。")
     reason: str = PydanticField(default="", description="选择这张表情包的简短理由。")
 
 
@@ -409,22 +409,11 @@ async def _select_emoji_with_sub_agent(
     if selection_metadata is not None:
         selection_metadata["prompt_html_uri"] = response.prompt_html_uri
 
-    from src.plugin_runtime.policy_bridge import resolve_policy
-
     selection_content = response.content or ""
-    handled, policy = await resolve_policy("emoji", "selection_result", {
-        "content": selection_content, "candidate_count": len(sampled_emojis),
-    })
-    if handled and isinstance(policy, dict):
-        if policy.get("skip") is True:
-            if selection_metadata is not None:
-                selection_metadata["reason"] = str(policy.get("reason") or "未得到有效的表情包选择")
-            return None, str(policy.get("reason") or "未得到有效的表情包选择，本次不发送")
-        selection_content = str(policy.get("content") or "")
     try:
         selection = EmojiSelectionResult.model_validate_json(selection_content)
     except Exception as exc:
-        logger.warning(f"{tool_ctx.runtime.log_prefix} 表情包子代理结果解析失败，将回退到候选首项: {exc}")
+        logger.warning(f"{tool_ctx.runtime.log_prefix} 表情包子代理结果解析失败，本次不发送: {exc}")
         if selection_metadata is not None:
             selection_metadata["monitor_detail"] = _build_send_emoji_monitor_detail(
                 request_message_count=len(request_messages),
@@ -437,8 +426,7 @@ async def _select_emoji_with_sub_agent(
                     }
                 ],
             )
-        fallback_emoji = sampled_emojis[0] if sampled_emojis else None
-        return fallback_emoji, ""
+        return None, "表情包选择结果无法解析，本次未发送"
 
     if selection_metadata is not None:
         selection_metadata["reason"] = selection.reason.strip()
@@ -451,8 +439,8 @@ async def _select_emoji_with_sub_agent(
 
     emoji_index = int(selection.emoji_index)
     if emoji_index < 1 or emoji_index > len(sampled_emojis):
-        logger.warning(f"{tool_ctx.runtime.log_prefix} 表情包子代理返回了无效序号: {emoji_index!r}，将回退到第 1 张")
-        emoji_index = 1
+        logger.warning(f"{tool_ctx.runtime.log_prefix} 表情包子代理返回了无效序号: {emoji_index!r}，本次不发送")
+        return None, "表情包选择序号无效，本次未发送"
 
     return sampled_emojis[emoji_index - 1], ""
 

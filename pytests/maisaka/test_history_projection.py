@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from pytests.maisaka.test_planner_text_reply import _history, _message, engine
+from pytests.maisaka.reply_fixtures import _history, _message, engine
 from src.chat.replyer.maisaka_generator_base import BaseMaisakaReplyGenerator
 from src.core.tooling import ToolInvocation
 from src.maisaka.builtin_tool import reply as reply_tool

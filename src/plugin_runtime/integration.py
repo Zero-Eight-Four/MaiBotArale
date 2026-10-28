@@ -375,6 +375,22 @@ class PluginRuntimeManager(
             raise ValueError("Platform IO 入站封装缺少可用的 SessionMessage 或 payload")
         session_message.received_at = received_at
 
+        # 文件来源由已登记的入站驱动签注，不接受消息负载伪造的适配器身份。
+        from src.platform_io import get_platform_io_manager
+        from src.common.data_models.message_component_data_model import FileComponent
+
+        descriptor = get_platform_io_manager().driver_registry.get(envelope.driver_id).descriptor
+        group = session_message.message_info.group_info
+        session_message.file_source = {
+            "driver_id": envelope.driver_id, "plugin_id": descriptor.plugin_id or "",
+            "account_id": descriptor.account_id or "", "scope": descriptor.scope or "",
+            "platform": descriptor.platform,
+            "group_id": group.group_id if group else "",
+            "user_id": session_message.message_info.user_info.user_id,
+            "files": {(component.file_id, component.busid) for component in session_message.raw_message.components
+                      if isinstance(component, FileComponent)},
+        }
+
         from src.chat.message_receive.bot import chat_bot
 
         await chat_bot.receive_message(session_message)
@@ -627,6 +643,12 @@ class PluginRuntimeManager(
             )
             logger.error(f"检测到重复插件 ID，冲突插件将被隔离，其余插件继续加载: {details}")
 
+        # 桌宠已经内置；保留旧插件源码和数据，但不能再启动第二个窗口。
+        known_plugins = await asyncio.to_thread(self._discover_plugin_dependency_map, plugin_dirs)
+        if "sengokucola.desktop-pet" in known_plugins:
+            duplicate_plugin_reasons["sengokucola.desktop-pet"] = (
+                "桌宠已合并到主程序，请在主程序配置中启用 desktop_pet.enabled；旧待办和窗口位置继续沿用。"
+            )
         result = await self._plugin_dependency_pipeline.execute(
             plugin_dirs,
             initial_blocked_plugin_reasons=duplicate_plugin_reasons,
@@ -1455,6 +1477,15 @@ class PluginRuntimeManager(
         except Exception as exc:
             logger.warning(f"插件 {plugin_id} 运行时配置校验不可用，将回退到静态 Schema: {exc}")
             return None
+
+    async def config_widgets(self, plugin_id: str, action_id: Optional[str] = None) -> Dict[str, Any]:
+        """将请求送到插件所属 Runner，只允许已启动的运行时实例。"""
+        if not self._started:
+            raise RuntimeError("插件运行时未启动")
+        supervisor = self._get_supervisor_for_plugin(plugin_id)
+        if supervisor is None:
+            raise RuntimeError("插件未运行")
+        return await supervisor.config_widgets(plugin_id, action_id)
 
     async def inspect_plugin_config(
         self,

@@ -1,7 +1,7 @@
 ﻿"""reply 工具适配与共用回复执行服务。"""
 
 from copy import deepcopy
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, Tuple
 
 import asyncio
 import json
@@ -27,6 +27,9 @@ from src.plugin_runtime.host.reply_extensions import ReplyExtensionExecution, bu
 from src.services import send_service
 
 from .context import BuiltinToolRuntimeContext, PostProcessedReplyMessage
+
+if TYPE_CHECKING:
+    from src.maisaka.reply_supplement import ReplySupplement
 
 logger = get_logger("maisaka_builtin_reply")
 _REPLY_TOOL_INTERNAL_ARGUMENTS = {
@@ -216,7 +219,7 @@ def get_tool_spec(context: Optional[ToolAvailabilityContext] = None) -> ToolSpec
             "minimum": 0,
             "description": "可选。从 show_emoji_list 的拼图选择一个表情包，填写图片序号，在文字后发送；0 或不填表示不发送表情包。",
         }
-    if config_module.global_config.chat.enable_reply_at:
+    if config_module.global_config.chat.enable_reply_at and context is not None and context.is_group_chat:
         properties["attach_at"] = {
             "type": "array",
             "description": "可选。随本次回复 at 一个或多个目标消息的发送者，填写目标 msg_id。",
@@ -241,28 +244,19 @@ def get_tool_spec(context: Optional[ToolAvailabilityContext] = None) -> ToolSpec
     )
 
 
-def get_reply_options_spec(context: Optional[ToolAvailabilityContext] = None) -> ToolSpec:
-    """被动式 replyer 保留参数设置能力，设置本身不生成或发送消息。"""
-
-    spec = get_tool_spec(context)
-    spec.name = "set_reply_options"
-    spec.description = (
-        "可选：设置下一次发言的附件、@、表达方式和插件参数，本工具不生成或发送回复。"
-        "每次调用整体替换已暂存参数，空对象清空；最终直接输出发言指导时应用一次。"
-        "本轮结束（含 stop、wait 或失败）后清空；普通文字回复无需调用。"
-    )
-    spec.parameters_schema["properties"].pop("msg_id")
-    spec.parameters_schema["properties"].pop("reply_reference")
-    spec.parameters_schema["required"] = []
-    spec.parameters_schema["additionalProperties"] = False
-    return spec
-
-
 def _build_monitor_metadata(reply_result: ReplyGenerationResult, reply_id: str = "") -> Dict[str, object]:
     """从 reply 结果中提取统一监控详情。"""
 
     monitor_detail = reply_result.monitor_detail
     metadata: Dict[str, object] = {"reply_id": reply_id} if reply_id else {}
+    supplement_detail = reply_result.metrics.extra.get("reply_supplement")
+    if isinstance(supplement_detail, dict):
+        metadata["reply_supplement"] = supplement_detail
+        monitor_detail = dict(monitor_detail)
+        monitor_detail["extra_sections"] = [
+            *monitor_detail.get("extra_sections", []),
+            {"title": "回复补充编排", "content": json.dumps(supplement_detail, ensure_ascii=False, indent=2)},
+        ]
     if isinstance(monitor_detail, dict):
         metadata["monitor_detail"] = monitor_detail
     return metadata
@@ -294,10 +288,11 @@ def _resolve_segment_reply_context(
     effective_set_quote: bool,
     target_message: Any,
     previous_sent_message: Any,
+    first_reply_index: int = 0,
 ) -> tuple[bool, Any]:
     """确定当前分段是否引用，以及引用所使用的真实消息对象。"""
 
-    if index == 0:
+    if index == first_reply_index:
         return effective_set_quote, target_message
     if quote_previous and previous_sent_message is not None:
         return True, previous_sent_message
@@ -384,17 +379,22 @@ async def _apply_reply_execution_policy(tool_ctx, target_message, parameters):
     for _ in range(3):
         version=runtime._input_version
         result=await runtime._conversation_policy("prepare_reply",target=target_message,parameters=parameters)
-        if version==runtime._input_version:break
-    else:result={"decision":"replan","pause_execution":True,"reason":"输入持续变化，请合并后重新规划"}
+        if version == runtime._input_version:
+            break
+    else:
+        result = {"decision": "replan", "pause_execution": True, "reason": "输入持续变化，请合并后重新规划"}
     decision=result.get("decision","allow")
-    if decision=="skip":return tool_ctx.build_success_result("reply",str(result.get("reason","")),metadata={"extension_skip":True})
+    if decision == "skip":
+        return tool_ctx.build_success_result("reply", str(result.get("reason", "")), metadata={"extension_skip": True})
     if decision=="replan":
         if result.get("pause_execution"):
             runtime._enter_stop_state()
-            if not runtime._message_turn_scheduled:runtime._enqueue_message_turn()
+            if not runtime._message_turn_scheduled:
+                runtime._enqueue_message_turn()
         return tool_ctx.build_failure_result("reply",str(result.get("reason","")),
             metadata={"stale_reply":True,"pause_execution":bool(result.get("pause_execution"))})
-    if decision!="allow":raise ValueError("Invalid reply execution decision")
+    if decision != "allow":
+        raise ValueError("Invalid reply execution decision")
     return None
 
 
@@ -423,11 +423,13 @@ async def execute_reply(
     *,
     call_id: str,
     target_message: Optional[SessionMessage] = None,
+    supplement_runner: Optional[Callable[[], Awaitable["ReplySupplement"]]] = None,
 ) -> ToolExecutionResult:
     """共用回复执行入口，保留附件、插件扩展、Hook 和发送统计。
 
     普通 Planner 直接调用；Focus 的 reply 工具经参数解包后调用同一入口。
     target_message 可传入请求前固定的真实消息，避免生成期间历史变化影响引用目标。
+    supplement_runner 在正文生成时并行运行；两者完成并校验后才开始发送。
     """
 
     invocation_arguments = deepcopy(arguments)
@@ -488,9 +490,12 @@ async def execute_reply(
             f"未找到要回复的目标消息，msg_id={to_display_message_id(target_message_id)}",
         )
 
+    response_target_message = target_message
+    reply_tool_args["_host_context"]["reply_target_message_id"] = target_message_id
+
     draft_revision=tool_ctx.runtime._context_revision
     execution_parameters={**invocation_arguments,"_host_draft_revision":draft_revision}
-    if deferred := await _apply_reply_execution_policy(tool_ctx,target_message,execution_parameters):
+    if deferred := await _apply_reply_execution_policy(tool_ctx,response_target_message,execution_parameters):
         return deferred
 
     extension_execution = ReplyExtensionExecution(
@@ -544,15 +549,19 @@ async def execute_reply(
     from src.plugin_runtime.context_views import prepare_history
     history_projection = await prepare_history(replyer_chat_history, tool_ctx.runtime.session_id)
     replyer_chat_history = list(history_projection.messages)
-    previous_target_reply = _find_recent_reply_to_target(replyer_chat_history, target_message_id)
+    # 并行编排的引用目标尚未确定，不能把请求快照的最后一条消息强制指定为正文回复对象。
+    previous_target_reply = (
+        _find_recent_reply_to_target(replyer_chat_history, target_message_id) if supplement_runner is None else ""
+    )
     if previous_target_reply:
         reply_tool_args = _with_duplicate_target_reply_reminder(reply_tool_args, previous_target_reply)
+    supplement: Optional["ReplySupplement"] = None
     try:
-        tool_ctx.runtime._update_stage_status("Replyer", "生成可见回复")
-        success, reply_result = await replyer.generate_reply_with_context(
+        tool_ctx.runtime._update_stage_status("Replyer", "生成可见回复及富文本编排" if supplement_runner else "生成可见回复")
+        generation = replyer.generate_reply_with_context(
             reply_reason="",
             stream_id=tool_ctx.runtime.session_id,
-            reply_message=target_message,
+            reply_message=target_message if supplement_runner is None else None,
             chat_history=replyer_chat_history,
             _history_projection=history_projection,
             image_recognition_refresher=lambda history: (
@@ -568,13 +577,27 @@ async def execute_reply(
             ),
             log_reply=False,
         )
+        if supplement_runner is None:
+            success, reply_result = await generation
+        else:
+            # 明确收回另一分支：失败或取消后不能遗留仍在生成的后台任务。
+            tasks = [asyncio.create_task(generation), asyncio.create_task(supplement_runner())]
+            try:
+                generation_result, supplement = await asyncio.gather(*tasks)
+                success, reply_result = generation_result
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            reply_result.metrics.extra["reply_supplement"] = supplement.metadata
     except Exception as exc:
         logger.exception(
             f"{tool_ctx.runtime.log_prefix} 回复生成器执行异常: 目标消息编号={target_message_id} 异常={exc}"
         )
         return tool_ctx.build_failure_result(
             "reply",
-            "生成可见回复时发生异常。",
+            f"生成可见回复或补充内容时发生异常：{type(exc).__name__}: {exc}",
             metadata={"reply_id": extension_execution.reply_id},
         )
 
@@ -592,6 +615,16 @@ async def execute_reply(
             "生成可见回复失败。",
             metadata=reply_metadata,
         )
+
+    if supplement is not None:
+        # msg_id 只决定发送时的引用；正文仍根据 Planner 指导生成，不等待补充器。
+        if supplement.quote_message is not None:
+            target_message = supplement.quote_message
+            target_message_id = target_message.message_id
+            invocation_arguments["msg_id"] = target_message_id
+            extension_execution.reply_message_id = target_message_id
+        reply_tool_args["reply_supplement"] = supplement.plan.model_dump()
+        invocation_arguments["reply_supplement"] = supplement.plan.model_dump()
 
     try:
         reply_text, post_process_options = await _invoke_before_post_process_hook(
@@ -620,9 +653,11 @@ async def execute_reply(
     try:
         reply_items = await tool_ctx.post_process_reply_message_items_async(
             reply_text,
-            invocation_arguments,
+            invocation_arguments if supplement is None else None,
             **post_process_options,
         )
+        if supplement is not None:
+            reply_items = supplement.compose(reply_items)
     except Exception as exc:
         reply_result.completion.response_text = reply_text
         reply_result.monitor_detail = build_reply_monitor_detail(reply_result)
@@ -663,7 +698,7 @@ async def execute_reply(
                 metadata=_build_monitor_metadata(reply_result, extension_execution.reply_id),
             )
     reply_sequences = [item.sequence for item in reply_items]
-    if deferred := await _apply_reply_execution_policy(tool_ctx,target_message,execution_parameters):
+    if deferred := await _apply_reply_execution_policy(tool_ctx,response_target_message,execution_parameters):
         return deferred
 
     reply_segments = [build_visible_text_from_sequence(sequence) for sequence in reply_sequences]
@@ -674,13 +709,21 @@ async def execute_reply(
     reply_metadata = _build_monitor_metadata(reply_result, extension_execution.reply_id)
     if extension_execution.targets:
         reply_metadata["reply_extensions"] = list(extension_execution.parameters)
-    # 最终正文生成后，按首段正文与当前聊天情境抽样一次，后续分段不重复抽样。
+    # 旧链路按首段正文与当前聊天情境抽样一次；补充器明确选定的引用挂在首段正文上。
+    first_reply_index = next(
+        (index for index, sequence in enumerate(reply_sequences)
+         if any(isinstance(c, TextComponent) and c.text.strip() for c in sequence.components)), 0,
+    )
     first_text = (
-        "".join(c.text for c in reply_sequences[0].components if isinstance(c, TextComponent))
+        "".join(c.text for c in reply_sequences[first_reply_index].components if isinstance(c, TextComponent))
         if reply_sequences else ""
     )
-    set_quote, quote_probability = await _resolve_reply_quote(tool_ctx, first_text, target_message)
-    # 群聊与私聊均由各自的三档频率控制。
+    if supplement is None:
+        set_quote, quote_probability = await _resolve_reply_quote(tool_ctx, first_text, target_message)
+    else:
+        set_quote, quote_probability = supplement.quote_message is not None, None
+        reply_metadata["reply_supplement"] = supplement.metadata
+    # 旧链路保留群聊/私聊的三档抽样；补充器在解析编排时同样遵守「不引用」设置。
     effective_set_quote = set_quote
     if quote_probability is not None:
         reply_metadata["quote_probability"] = quote_probability
@@ -698,7 +741,7 @@ async def execute_reply(
                     _build_send_result(
                         index=index,
                         segment=segment,
-                        set_quote=effective_set_quote if index == 0 else False,
+                        set_quote=effective_set_quote if index == first_reply_index else False,
                         success=True,
                     )
                 )
@@ -720,6 +763,7 @@ async def execute_reply(
                     effective_set_quote=effective_set_quote,
                     target_message=target_message,
                     previous_sent_message=previous_sent_message,
+                    first_reply_index=first_reply_index,
                 )
                 sent_message = await send_service._send_to_target_with_message(
                     message_sequence=reply_sequence,
@@ -744,7 +788,7 @@ async def execute_reply(
                     )
                     break
                 # Commit the flow receipt after the first confirmed send too.
-                await tool_ctx.runtime._conversation_policy("sent",target=target_message,parameters={"event_id":call_id,"prepared_revision":draft_revision})
+                await tool_ctx.runtime._conversation_policy("sent",target=response_target_message,parameters={"event_id":call_id,"prepared_revision":draft_revision})
                 sent_message_id = sent_message.message_id.strip()
                 if sent_message_id:
                     sent_message_ids.append(sent_message_id)
@@ -785,7 +829,7 @@ async def execute_reply(
             metadata=reply_metadata,
         )
 
-    target_user_info = target_message.message_info.user_info
+    target_user_info = response_target_message.message_info.user_info
     bot_name = config_module.global_config.bot.nickname.strip() or "MaiSaka"
     if is_bot_self(tool_ctx.runtime.chat_stream.platform, target_user_info.user_id):
         # 自身消息只是回复的引用锚点，不能把其作者当作实际收件人。
@@ -797,8 +841,8 @@ async def execute_reply(
 
     if tool_ctx.runtime.chat_stream.platform == CLI_PLATFORM_NAME:
         tool_ctx.append_guided_reply_to_chat_history(combined_reply_text)
-    await tool_ctx.runtime.record_planner_reply(target_message, event_id=call_id)
-    extension_receipt = await tool_ctx.runtime._conversation_policy("sent",target=target_message,parameters={"event_id":call_id,"prepared_revision":draft_revision})
+    await tool_ctx.runtime.record_planner_reply(response_target_message, event_id=call_id)
+    extension_receipt = await tool_ctx.runtime._conversation_policy("sent",target=response_target_message,parameters={"event_id":call_id,"prepared_revision":draft_revision})
     return tool_ctx.build_success_result(
         "reply",
         reply_receipt + "\n" + str(extension_receipt.get("receipt_hint", "")),

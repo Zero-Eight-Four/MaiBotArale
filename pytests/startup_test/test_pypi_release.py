@@ -6,11 +6,13 @@ from typing import Dict
 
 import hashlib
 import json
+import sys
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / ".github/scripts/maibot_release.py"
 SPEC = spec_from_file_location("maibot_release_checks", SCRIPT)
+sys.path.insert(0, str(SCRIPT.parent))
 release = module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
 

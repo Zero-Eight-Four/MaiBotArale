@@ -1150,8 +1150,7 @@ class EmojiManager:
         )
 
     async def periodic_emoji_maintenance(self) -> None:
-        """Run bounded emoji maintenance batches periodically."""
-        scan_after = ""
+        """Run emoji maintenance tasks periodically."""
         while True:
             wait_seconds = max(global_config.emoji.check_interval * 60, 0)
             try:
@@ -1175,12 +1174,7 @@ class EmojiManager:
                         if record_path := _resolve_existing_emoji_path(record.full_path):
                             known_paths.add(record_path)
                 logger.info("[emoji_maintenance] Scanning data/emoji for new emojis...")
-                # Rotate bounded batches so fast model failures cannot scan the entire backlog.
-                files = sorted(EMOJI_DIR.iterdir(), key=lambda path: path.name)
-                if scan_after:
-                    files = [path for path in files if path.name > scan_after] + [path for path in files if path.name <= scan_after]
-                attempted = 0
-                for emoji_file in files:
+                for emoji_file in EMOJI_DIR.iterdir():
                     if not emoji_file.is_file():
                         continue
                     resolved_file = emoji_file.absolute().resolve()
@@ -1192,22 +1186,19 @@ class EmojiManager:
                             f"{global_config.emoji.max_emoji_size_mb:g} MB, skipping: {emoji_file.name}"
                         )
                         continue
-                    if attempted >= 10:
-                        break
-                    attempted += 1
-                    scan_after = emoji_file.name
                     try:
                         register_status = await self.register_emoji_by_filename(emoji_file)
                     except Exception as e:
                         logger.error(f"[emoji_maintenance] Failed to process {emoji_file.name}: {e}")
-                        # Wait for the next scheduled cycle instead of hammering an unavailable model.
-                        break
+                        register_status = "failed"
                     if register_status == "registered":
                         break
                     if register_status == "skipped":
                         logger.debug(f"[emoji_maintenance] Emoji already registered, keep file: {emoji_file.name}")
                     else:
                         logger.debug(f"[emoji_maintenance] Emoji not registered, keep file: {emoji_file.name}")
+                    # 拒绝替换或处理失败也结束本轮，避免积压文件连续触发模型请求。
+                    break
 
             try:
                 await asyncio.to_thread(self.check_emoji_file_integrity)
@@ -1282,6 +1273,8 @@ class EmojiManager:
             return "failed"
 
         if self._emoji_num >= global_config.emoji.max_reg_num and global_config.emoji.do_replace:
+            # 已有描述的候选也需要记录处理状态，避免拒绝替换后被维护任务反复选中。
+            await asyncio.to_thread(self._mark_emoji_vlm_processed, target_emoji)
             logger.warning(
                 f"[register_emoji] Emoji limit {global_config.emoji.max_reg_num} reached, trying replacement"
             )

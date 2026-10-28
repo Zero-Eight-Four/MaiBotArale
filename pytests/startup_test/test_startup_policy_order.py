@@ -36,6 +36,8 @@ def test_vector_background_work_waits_for_plugin_startup_completion(monkeypatch,
         install(monkeypatch,'src.chat.message_receive.chat_manager',chat_manager=SimpleNamespace(
             initialize=AsyncMock(),regularly_save_sessions=AsyncMock()))
         install(monkeypatch,'src.services.memory_flow_service',memory_automation_service=SimpleNamespace(start=AsyncMock()))
+        install(monkeypatch,'src.computer.service',computer_service=SimpleNamespace(start=AsyncMock()))
+        install(monkeypatch,'src.desktop_pet.service',desktop_pet_service=SimpleNamespace(start=AsyncMock()))
         install(monkeypatch,'src.agent.service',agent_service=SimpleNamespace(start=AsyncMock()))
         install(monkeypatch,'src.core.event_bus',event_bus=SimpleNamespace(emit=AsyncMock()))
         install(monkeypatch,'src.core.types',EventType=SimpleNamespace(ON_START='start'))
@@ -45,7 +47,7 @@ def test_vector_background_work_waits_for_plugin_startup_completion(monkeypatch,
         monkeypatch.setattr(main,'prompt_manager',SimpleNamespace(load_prompts=Mock()))
         monkeypatch.setattr(main,'async_task_manager',SimpleNamespace(add_task=AsyncMock()))
         monkeypatch.setattr(main,'diagnostic_stage',lambda *a,**kw:nullcontext())
-        monkeypatch.setattr(main.MainSystem,'_start_webui_server',Mock())
+        monkeypatch.setattr(main.MainSystem,'_start_http_server',Mock())
         task=asyncio.create_task(main.MainSystem()._init_components())
         await entered.wait()
         started_too_early='embedding_policy_request' in events

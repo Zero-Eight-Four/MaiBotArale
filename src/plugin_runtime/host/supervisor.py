@@ -29,6 +29,7 @@ from src.plugin_runtime import (
     ENV_BLOCKED_PLUGIN_REASONS,
     ENV_EXTERNAL_PLUGIN_IDS,
     ENV_FORCE_PLUGIN_COMPATIBILITY,
+    ENV_HOST_PID,
     ENV_HOST_VERSION,
     ENV_IPC_ADDRESS,
     ENV_LOCAL_PLUGIN_SDK_PATH,
@@ -976,6 +977,17 @@ class PluginRunnerSupervisor:
             raise ValueError("插件配置校验失败")
         return dict(result.normalized_config)
 
+    async def config_widgets(self, plugin_id: str, action_id: Optional[str] = None) -> Dict[str, Any]:
+        """读取配置页控件或执行声明的按钮，不写入配置。"""
+        self._ensure_accepting_runner_rpc()
+        response = await self._rpc_server.send_request(
+            "plugin.config_widgets", plugin_id=plugin_id,
+            payload={"action_id": action_id}, timeout_ms=10000,
+        )
+        if response.error:
+            raise ValueError(str(response.error.get("message", "配置页运行时请求失败")))
+        return response.payload
+
     async def inspect_plugin_config(
         self,
         plugin_id: str,
@@ -1894,6 +1906,7 @@ class PluginRunnerSupervisor:
                 is_force_plugin_compatibility_enabled()
             ),
             ENV_HOST_VERSION: self._host_version,
+            ENV_HOST_PID: str(os.getpid()),
             ENV_IPC_ADDRESS: self._transport.get_address(),
             ENV_PLUGIN_DIRS: os.pathsep.join(str(path) for path in self._plugin_dirs),
             ENV_PLUGIN_TYPE_FILTER: self._plugin_type_filter,

@@ -162,3 +162,4 @@ async def test_native_expression_and_style_survive_when_flow_does_not_strip_them
     args=generator.generate_reply_with_context.await_args.kwargs['reply_tool_args']
     assert args['reply_style']=='长回复' and args['expression_intent']=={'focus':'current'}
     assert 'supplement_reason' not in args
+    assert args['_host_context']['reply_target_message_id']=='m'

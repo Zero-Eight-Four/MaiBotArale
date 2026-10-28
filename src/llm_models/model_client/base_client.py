@@ -251,6 +251,8 @@ class RequestTraceContext:
     current_attempt_started_at: float = 0.0
     rate_limit_wait_seconds: float = 0.0
     generation_attempts: List[GenerationAttempt] = field(default_factory=list)
+    # Request-local projection shared only by retries/model switches of this logical call.
+    sanitized_context_items: List[ContextItem] | None = None
 
     def replace_attempt_status(self, attempt_number: int, status: str) -> None:
         """更新指定 Provider 尝试的后续调度状态。"""

@@ -34,8 +34,6 @@ _REPLY_TOOL_INTERNAL_ARGUMENTS = {
     "_reply_id",
     "_plugin_reply_prompt",
     "supplement_reason",
-    "expression_intent",
-    "reply_style",
 }
 _DUPLICATE_TARGET_REPLY_REMINDER_ARG = "_duplicate_target_reply_reminder"
 _DUPLICATE_TARGET_REPLY_REMINDER_TEMPLATE = (

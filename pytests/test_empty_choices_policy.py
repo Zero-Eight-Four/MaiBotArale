@@ -100,3 +100,37 @@ async def test_empty_choices_strips_images_on_retry_and_switches_model_when_exha
     second_req = client.get_response.await_args_list[1].args[0]
     assert any(isinstance(p, ContextImagePart) for p in first_req.context_items[0].parts)
     assert not any(isinstance(p, ContextImagePart) for p in second_req.context_items[0].parts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cancel', [False, True])
+async def test_retry_context_is_request_local_and_survives_cancellation(monkeypatch, cancel):
+    import asyncio
+    from src.llm_models.model_client.base_client import RequestTraceContext
+    from src.llm_models.payload_content.context_item import ContextItemMeta, ContextTextPart, UserMessageItem
+    from src.plugin_runtime.hook_payloads import serialize_prompt_items
+    initial=UserMessageItem(meta=ContextItemMeta.create(),parts=(ContextTextPart('initial'),))
+    cleaned=UserMessageItem(meta=initial.meta,parts=(ContextTextPart('cleaned'),))
+    async def resolve(feature, action, payload):
+        if action=='empty_choices':
+            return True, {'retry':True,'retry_after':0,'context_items':serialize_prompt_items([cleaned])}
+        return False, {}
+    monkeypatch.setattr(policy_bridge,'resolve_policy',resolve)
+    monkeypatch.setattr('src.llm_models.utils_model.mark_request_succeeded',lambda *a:None)
+    monkeypatch.setattr('src.llm_models.utils_model.update_failed_request_attempt',lambda *a,**k:None)
+    monkeypatch.setattr('src.llm_models.utils_model.save_failed_request_snapshot',lambda **k:None)
+    model=ModelInfo(model_type='llm',name='test-model',model_identifier='test-model',api_provider='test')
+    provider=APIProvider(name='test',api_key='test',base_url='https://example.invalid',max_retry=5)
+    trace=RequestTraceContext();request=ResponseRequest(model_info=model,context_items=[initial],trace_context=trace)
+    response=SimpleNamespace();client=SimpleNamespace(get_response=AsyncMock(side_effect=[
+        ModelResponseTerminatedError('empty_choices'),asyncio.CancelledError() if cancel else response]))
+    worker=object.__new__(LLMOrchestrator);worker.request_type='maisaka.planner';worker.task_name='planner'
+    worker._record_success_generation_attempt=Mock();worker._schedule_llm_retry_event=Mock()
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):await worker._attempt_request_on_model(provider,client,request)
+    else:
+        assert await worker._attempt_request_on_model(provider,client,request) is response
+    assert trace.sanitized_context_items[0].parts[0].text=='cleaned'
+    assert client.get_response.await_args_list[-1].args[0].trace_context is trace
+    assert request.context_items[0].parts[0].text=='initial'
+    assert RequestTraceContext().sanitized_context_items is None

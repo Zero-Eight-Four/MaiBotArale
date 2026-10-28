@@ -182,3 +182,13 @@ description = "AI 検索の回答が根拠検証に失敗した場合に、根�
 display_name = "WebUI AI 検索の根拠メッセージ"
 advanced = true
 description = "AI 検索の読み取り専用ツールの結果を、ツールなしのリクエストで使える根拠メッセージに変換します。"
+
+[maisaka_replyer_document]
+display_name = "記事・コミュニティ投稿の執筆"
+advanced = true
+description = "与えられた資料から人物の語り口を保って記事や投稿を書き、資料と自身の経験を区別する。"
+
+[maisaka_wait_reminder]
+display_name = "連続待機の通知"
+advanced = true
+description = "待機が続いた際にPlannerへ待機の見直しや現在の思考終了を促す。"

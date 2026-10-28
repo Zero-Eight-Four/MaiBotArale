@@ -1,6 +1,7 @@
 """Maisaka 回复文本后处理策略测试。"""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -140,3 +141,24 @@ async def test_before_post_process_hook_controls_current_reply_only() -> None:
     assert calls[0][0] == "maisaka.reply.before_post_process"
     assert calls[0][1]["session_id"] == "session-1"
     assert calls[0][1]["reply_message_id"] == "message-1"
+
+
+@pytest.mark.asyncio
+async def test_native_expression_and_style_survive_when_flow_does_not_strip_them(monkeypatch):
+    from src.maisaka.builtin_tool import reply
+    from src.common.data_models.reply_generation_data_models import ReplyGenerationResult
+    import src.plugin_runtime.context_views as views
+    monkeypatch.setattr(reply,'_use_expression_intent',lambda:True)
+    generator=SimpleNamespace(generate_reply_with_context=AsyncMock(return_value=(False,ReplyGenerationResult())))
+    monkeypatch.setattr(reply.replyer_manager,'get_replyer',lambda **kw:generator)
+    monkeypatch.setattr(views,'prepare_history',AsyncMock(return_value=SimpleNamespace(messages=[])))
+    rt=SimpleNamespace(session_id='s',_input_version=1,_context_revision=1,_chat_history=[],log_prefix='test',
+        _conversation_policy=AsyncMock(return_value={'decision':'allow'}),_update_stage_status=Mock(),
+        chat_stream=SimpleNamespace(platform='qq',is_group_session=False,group_id='',user_id='u',account_id='b'))
+    tool=SimpleNamespace(runtime=rt,engine=SimpleNamespace(_active_logical_turn_id='t'),build_failure_result=Mock())
+    await reply.execute_reply(tool,arguments={'msg_id':'m','reply_reference':'解释当前问题','reply_style':'长回复',
+        'expression_intent':{'focus':'current'},'supplement_reason':'essential_new_result'},
+        call_id='c',target_message=SimpleNamespace(message_id='m'))
+    args=generator.generate_reply_with_context.await_args.kwargs['reply_tool_args']
+    assert args['reply_style']=='长回复' and args['expression_intent']=={'focus':'current'}
+    assert 'supplement_reason' not in args

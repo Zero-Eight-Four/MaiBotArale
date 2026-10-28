@@ -177,3 +177,13 @@ description = "用于在 AI 搜索回答未通过证据校验时，要求模型�
 display_name = "WebUI AI 搜索证据消息"
 advanced = true
 description = "用于把 AI 搜索中只读工具的返回结果包装成无工具请求可用的证据消息。"
+
+[maisaka_replyer_document]
+display_name = "文章与社区帖子写作"
+advanced = true
+description = "根据给定材料撰写完整文章或社区帖子，保留角色表达并区分资料与自身经历。"
+
+[maisaka_wait_reminder]
+display_name = "连续等待提醒"
+advanced = true
+description = "连续等待多次时提示Planner重新评估等待或结束当前思考。"

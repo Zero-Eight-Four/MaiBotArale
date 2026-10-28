@@ -159,8 +159,6 @@ class MainSystem:
 
         a_memorix_host_service.register_config_reload_callback()
         get_mcp_service().register_config_reload_callback()
-        with diagnostic_stage("startup.expression_vector_schedule"):
-            expression_vector_service.start()
         a_memorix_task = asyncio.create_task(a_memorix_host_service.start(), name="a_memorix_start")
 
         with diagnostic_stage("startup.first_background_dispatch"):
@@ -192,6 +190,10 @@ class MainSystem:
                 return_exceptions=True,
             )
             raise
+
+        # Runner 拉起不代表插件 on_load 已完成；依赖插件策略的后台请求须在启动等待后调度。
+        with diagnostic_stage("startup.expression_vector_schedule"):
+            expression_vector_service.start()
 
         # 初始化表情管理器
         logger.info(t("startup.emoji_manager_initialized"))
